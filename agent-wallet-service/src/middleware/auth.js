@@ -18,6 +18,19 @@ const RATE_LIMIT_MAX_REQUESTS = 100;
 // In-memory rate limit store (resets on restart)
 const rateLimitStore = new Map();
 
+// Clean up stale rate limits every minute
+setInterval(() => {
+  const windowStart = Date.now() - RATE_LIMIT_WINDOW_MS;
+  for (const [keyId, requests] of rateLimitStore.entries()) {
+    const recent = requests.filter(time => time > windowStart);
+    if (recent.length === 0) {
+      rateLimitStore.delete(keyId);
+    } else {
+      rateLimitStore.set(keyId, recent);
+    }
+  }
+}, RATE_LIMIT_WINDOW_MS).unref();
+
 // Load or create API keys
 function loadApiKeys() {
   if (existsSync(API_KEYS_FILE)) {
@@ -53,17 +66,17 @@ let apiKeys = loadApiKeys();
 function checkRateLimit(keyId) {
   const now = Date.now();
   const windowStart = now - RATE_LIMIT_WINDOW_MS;
-  
+
   // Get or create request history
   if (!rateLimitStore.has(keyId)) {
     rateLimitStore.set(keyId, []);
   }
-  
+
   const requests = rateLimitStore.get(keyId);
-  
+
   // Remove old requests outside window
   const recentRequests = requests.filter(time => time > windowStart);
-  
+
   if (recentRequests.length >= RATE_LIMIT_MAX_REQUESTS) {
     return {
       allowed: false,
@@ -71,11 +84,11 @@ function checkRateLimit(keyId) {
       resetAt: recentRequests[0] + RATE_LIMIT_WINDOW_MS
     };
   }
-  
+
   // Add current request
   recentRequests.push(now);
   rateLimitStore.set(keyId, recentRequests);
-  
+
   return {
     allowed: true,
     remaining: RATE_LIMIT_MAX_REQUESTS - recentRequests.length,
@@ -157,7 +170,7 @@ export function requireAuth(requiredPermission = 'read') {
     const apiKey = req.headers['x-api-key'] || (ALLOW_QUERY_API_KEY ? req.query.apiKey : undefined);
 
     if (!apiKey) {
-      return res.status(401).json({ 
+      return res.status(401).json({
         error: 'API key required',
         hint: ALLOW_QUERY_API_KEY
           ? 'Include X-API-Key header or ?apiKey= query param'
@@ -184,9 +197,9 @@ export function requireAuth(requiredPermission = 'read') {
     res.set('X-RateLimit-Limit', RATE_LIMIT_MAX_REQUESTS);
     res.set('X-RateLimit-Remaining', rateLimit.remaining);
     res.set('X-RateLimit-Reset', rateLimit.resetAt);
-    
+
     if (!rateLimit.allowed) {
-      return res.status(429).json({ 
+      return res.status(429).json({
         error: 'Rate limit exceeded',
         limit: RATE_LIMIT_MAX_REQUESTS,
         resetAt: new Date(rateLimit.resetAt).toISOString()

@@ -6,7 +6,7 @@
 import { readFileSync } from 'fs';
 import { join } from 'path';
 
-const API_URL = process.env.API_URL || 'http://localhost:3000';
+const API_URL = process.env.API_URL || 'http://127.0.0.1:3000';
 
 function resolveApiKey() {
   if (process.env.TEST_API_KEY) return process.env.TEST_API_KEY;
