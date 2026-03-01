@@ -7,7 +7,7 @@
 import 'dotenv/config';
 import { createWalletClient, createPublicClient, http, parseEther, formatEther } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
-import { 
+import {
   baseSepolia, base, mainnet, sepolia,
   polygon, optimism, optimismSepolia,
   arbitrum, arbitrumSepolia
@@ -27,48 +27,48 @@ import { evaluateTransferPolicy, recordPolicySpend } from './policy-engine.js';
 const ALCHEMY_KEY = process.env.ALCHEMY_API_KEY;
 
 // Alchemy URLs (only works for chains you've created apps for)
-const getAlchemyUrl = (network) => ALCHEMY_KEY 
-  ? `https://${network}.g.alchemy.com/v2/${ALCHEMY_KEY}` 
+const getAlchemyUrl = (network) => ALCHEMY_KEY
+  ? `https://${network}.g.alchemy.com/v2/${ALCHEMY_KEY}`
   : null;
 
 const CHAINS = {
   // Testnets
-  'base-sepolia': { 
-    chain: baseSepolia, 
+  'base-sepolia': {
+    chain: baseSepolia,
     rpcs: [getAlchemyUrl('base-sepolia'), 'https://sepolia.base.org', 'https://base-sepolia.blockpi.network/v1/rpc/public'].filter(Boolean)
   },
-  'ethereum-sepolia': { 
-    chain: sepolia, 
+  'ethereum-sepolia': {
+    chain: sepolia,
     rpcs: [getAlchemyUrl('eth-sepolia'), 'https://ethereum-sepolia.publicnode.com', 'https://rpc.sepolia.org'].filter(Boolean)
   },
-  'optimism-sepolia': { 
-    chain: optimismSepolia, 
+  'optimism-sepolia': {
+    chain: optimismSepolia,
     rpcs: [getAlchemyUrl('opt-sepolia'), 'https://sepolia.optimism.io', 'https://optimism-sepolia.publicnode.com'].filter(Boolean)
   },
-  'arbitrum-sepolia': { 
-    chain: arbitrumSepolia, 
+  'arbitrum-sepolia': {
+    chain: arbitrumSepolia,
     rpcs: [getAlchemyUrl('arb-sepolia'), 'https://sepolia-rollup.arbitrum.io/rpc', 'https://arbitrum-sepolia.publicnode.com'].filter(Boolean)
   },
-  
+
   // Mainnets
-  'base': { 
-    chain: base, 
+  'base': {
+    chain: base,
     rpcs: [getAlchemyUrl('base-mainnet'), 'https://mainnet.base.org', 'https://base-rpc.publicnode.com'].filter(Boolean)
   },
-  'ethereum': { 
-    chain: mainnet, 
+  'ethereum': {
+    chain: mainnet,
     rpcs: [getAlchemyUrl('eth-mainnet'), 'https://ethereum.publicnode.com', 'https://eth.llamarpc.com'].filter(Boolean)
   },
-  'polygon': { 
-    chain: polygon, 
+  'polygon': {
+    chain: polygon,
     rpcs: [getAlchemyUrl('polygon-mainnet'), 'https://polygon-rpc.com', 'https://polygon-bor.publicnode.com'].filter(Boolean)
   },
-  'optimism': { 
-    chain: optimism, 
+  'optimism': {
+    chain: optimism,
     rpcs: [getAlchemyUrl('opt-mainnet'), 'https://mainnet.optimism.io', 'https://optimism.publicnode.com'].filter(Boolean)
   },
-  'arbitrum': { 
-    chain: arbitrum, 
+  'arbitrum': {
+    chain: arbitrum,
     rpcs: [getAlchemyUrl('arb-mainnet'), 'https://arb1.arbitrum.io/rpc', 'https://arbitrum-one.publicnode.com'].filter(Boolean)
   }
 };
@@ -92,13 +92,13 @@ function getChainConfig(chainName) {
  */
 async function createClientWithFallback(chainConfig, clientType = 'public') {
   const { chain, rpcs } = chainConfig;
-  
+
   for (const rpc of rpcs) {
     try {
-      const client = clientType === 'public' 
+      const client = clientType === 'public'
         ? createPublicClient({ chain, transport: http(rpc) })
         : createWalletClient({ chain, transport: http(rpc) });
-      
+
       // Test the connection with a simple request
       if (clientType === 'public') {
         await client.getBlockNumber();
@@ -109,7 +109,7 @@ async function createClientWithFallback(chainConfig, clientType = 'public') {
       continue;
     }
   }
-  
+
   throw new Error(`All RPCs failed for chain ${chain.name}`);
 }
 
@@ -191,11 +191,11 @@ export async function createWallet({ agentName, chain = 'base-sepolia' }) {
  */
 export async function getBalance(address, chain) {
   const wallet = Array.from(wallets.values()).find(w => w.address === address);
-  
+
   // Use wallet's chain if not specified, fallback to default
   const chainName = chain || wallet?.chain || DEFAULT_CHAIN;
   const chainConfig = getChainConfig(chainName);
-  
+
   if (!wallet) {
     throw new Error(`Wallet not found: ${address}`);
   }
@@ -203,7 +203,7 @@ export async function getBalance(address, chain) {
   try {
     const { client, rpc } = await createClientWithFallback(chainConfig, 'public');
     const balance = await client.getBalance({ address });
-    
+
     return {
       chain: chainName,
       eth: formatEther(balance),
@@ -221,11 +221,11 @@ export async function getBalance(address, chain) {
  */
 export async function signTransaction({ from, to, value, data = '0x', chain }) {
   const wallet = Array.from(wallets.values()).find(w => w.address === from);
-  
+
   if (!wallet) {
     throw new Error(`Wallet not found: ${from}`);
   }
-  
+
   // Use provided chain or wallet's chain
   const chainName = chain || wallet.chain || DEFAULT_CHAIN;
   const chainConfig = getChainConfig(chainName);
@@ -245,9 +245,9 @@ export async function signTransaction({ from, to, value, data = '0x', chain }) {
     // Decrypt private key for use
     const decryptedKey = decrypt(wallet.privateKey);
     const account = privateKeyToAccount(decryptedKey);
-    
+
     const { client } = await createClientWithFallback(
-      { ...chainConfig, account }, 
+      { ...chainConfig, account },
       'wallet'
     );
 
@@ -335,7 +335,7 @@ export function getWalletById(id) {
  * Get wallet by address
  */
 export function getWalletByAddress(address) {
-  return Array.from(wallets.values()).find(w => 
+  return Array.from(wallets.values()).find(w =>
     w.address.toLowerCase() === address.toLowerCase()
   );
 }
@@ -349,7 +349,7 @@ export async function importWallet({ privateKey, agentName, chain = DEFAULT_CHAI
     if (!privateKey.startsWith('0x')) {
       privateKey = '0x' + privateKey;
     }
-    
+
     const account = privateKeyToAccount(privateKey);
     const walletId = `wallet_imported_${Date.now()}`;
 
@@ -364,10 +364,10 @@ export async function importWallet({ privateKey, agentName, chain = DEFAULT_CHAI
     };
 
     // Check if wallet already exists
-    const existing = Array.from(wallets.values()).find(w => 
+    const existing = Array.from(wallets.values()).find(w =>
       w.address.toLowerCase() === account.address.toLowerCase()
     );
-    
+
     if (existing) {
       return {
         id: existing.id,
@@ -400,11 +400,11 @@ export async function importWallet({ privateKey, agentName, chain = DEFAULT_CHAI
  */
 export async function getTransactionReceipt(txHash, chainName = DEFAULT_CHAIN) {
   const chainConfig = getChainConfig(chainName);
-  
+
   try {
     const { client } = await createClientWithFallback(chainConfig, 'public');
     const receipt = await client.getTransactionReceipt({ hash: txHash });
-    
+
     return {
       hash: receipt.transactionHash,
       status: receipt.status === 'success' ? 'success' : 'failed',
@@ -429,31 +429,29 @@ export async function getTransactionReceipt(txHash, chainName = DEFAULT_CHAIN) {
  * Get balance across all chains
  */
 export async function getMultiChainBalance(address) {
-  const balances = [];
-  
-  for (const [chainName, config] of Object.entries(CHAINS)) {
+  const requests = Object.entries(CHAINS).map(async ([chainName, config]) => {
     try {
       const { client } = await createClientWithFallback(config, 'public');
       const balance = await client.getBalance({ address });
-      
-      balances.push({
+
+      return {
         chain: chainName,
         eth: formatEther(balance),
         wei: balance.toString(),
         status: 'ok'
-      });
+      };
     } catch (error) {
-      balances.push({
+      return {
         chain: chainName,
         eth: '0',
         wei: '0',
         status: 'error',
         error: error.message
-      });
+      };
     }
-  }
-  
-  return balances;
+  });
+
+  return await Promise.all(requests);
 }
 
 /**
@@ -463,22 +461,22 @@ export async function estimateGas({ from, to, value, data = '0x', chain }) {
   const wallet = Array.from(wallets.values()).find(w => w.address === from);
   const chainName = chain || wallet?.chain || DEFAULT_CHAIN;
   const chainConfig = getChainConfig(chainName);
-  
+
   try {
     const { client } = await createClientWithFallback(chainConfig, 'public');
-    
+
     const gas = await client.estimateGas({
       account: from,
       to,
       value: parseEther(value || '0'),
       data
     });
-    
+
     // Get current gas price
     const gasPrice = await client.getGasPrice();
-    
+
     const estimatedCost = gas * gasPrice;
-    
+
     return {
       chain: chainName,
       gasUnits: gas.toString(),
@@ -498,16 +496,16 @@ export async function estimateGas({ from, to, value, data = '0x', chain }) {
 export async function sweepWallet({ from, to, chain }) {
   const wallet = Array.from(wallets.values()).find(w => w.address === from);
   if (!wallet) throw new Error('Wallet not found');
-  
+
   const chainName = chain || wallet.chain || DEFAULT_CHAIN;
   const chainConfig = getChainConfig(chainName);
-  
+
   try {
     const { client: publicClient } = await createClientWithFallback(chainConfig, 'public');
-    
+
     // Get balance
     const balance = await publicClient.getBalance({ address: from });
-    
+
     // Estimate gas
     const gasEstimate = await publicClient.estimateGas({
       account: from,
@@ -515,13 +513,13 @@ export async function sweepWallet({ from, to, chain }) {
       value: balance,
       data: '0x'
     });
-    
+
     const gasPrice = await publicClient.getGasPrice();
     const gasCost = gasEstimate * gasPrice;
-    
+
     // Calculate amount to send (balance - gas)
     const amountToSend = balance - gasCost;
-    
+
     if (amountToSend <= 0n) {
       throw new Error('Insufficient balance to cover gas');
     }
@@ -537,7 +535,7 @@ export async function sweepWallet({ from, to, chain }) {
     if (!policyEvaluation.allowed) {
       throw new Error(`Policy blocked sweep (${policyEvaluation.reason})`);
     }
-    
+
     // Create wallet client
     const account = privateKeyToAccount(decrypt(wallet.privateKey));
     const walletClient = createWalletClient({
@@ -545,7 +543,7 @@ export async function sweepWallet({ from, to, chain }) {
       chain: chainConfig.chain,
       transport: http(chainConfig.rpcs[0])
     });
-    
+
     const hash = await walletClient.sendTransaction({
       to,
       value: amountToSend,
@@ -560,7 +558,7 @@ export async function sweepWallet({ from, to, chain }) {
       chain: chainName
     });
     recordPolicySpend({ walletAddress: from, valueEth: amountToSendEth });
-    
+
     return {
       hash,
       from,
