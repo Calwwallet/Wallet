@@ -4,46 +4,36 @@
  * Simple transaction logging
  */
 
-import { readFileSync, writeFileSync, existsSync } from 'fs';
-import { join } from 'path';
+import {
+  getTransactionStore,
+  appendTransaction,
+  appendTransactionDb
+} from '../repositories/transaction-repository.js';
 
-const TX_FILE = join(process.cwd(), 'transactions.json');
-
-function loadTransactions() {
-  if (existsSync(TX_FILE)) {
-    return JSON.parse(readFileSync(TX_FILE, 'utf-8'));
-  }
-  return [];
-}
-
-function saveTransactions(txs) {
-  writeFileSync(TX_FILE, JSON.stringify(txs, null, 2));
-}
-
-let transactions = loadTransactions();
+let transactions = getTransactionStore();
+const USE_DB = process.env.STORAGE_BACKEND === 'db';
 
 /**
  * Log a transaction
  */
-export function logTransaction(tx) {
+export async function logTransaction(tx, { tenantId } = {}) {
   const record = {
     hash: tx.hash,
     from: tx.from,
     to: tx.to,
     value: tx.value,
     timestamp: new Date().toISOString(),
-    chain: 'base-sepolia'
+    chain: tx.chain || 'base-sepolia',
+    policy: tx.policy || null,
+    meta: tx.meta || null
   };
   
-  transactions.unshift(record);
-  
-  // Keep last 100 transactions
-  if (transactions.length > 100) {
-    transactions = transactions.slice(0, 100);
+  if (USE_DB) {
+    return appendTransactionDb(record, { tenantId }, 100);
   }
-  
-  saveTransactions(transactions);
-  return record;
+
+  transactions = getTransactionStore();
+  return appendTransaction(record, 100);
 }
 
 /**

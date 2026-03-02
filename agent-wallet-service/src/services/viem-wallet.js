@@ -13,11 +13,18 @@ import {
   arbitrum, arbitrumSepolia
 } from 'viem/chains';
 import { randomBytes } from 'crypto';
-import { readFileSync, writeFileSync, existsSync } from 'fs';
-import { join } from 'path';
 import { logTransaction } from './tx-history.js';
 import { encrypt, decrypt } from './encryption.js';
 import { evaluateTransferPolicy, recordPolicySpend } from './policy-engine.js';
+import {
+  getWalletStore,
+  persistWalletStore,
+  findWalletByAddress,
+  getAllWallets as repoGetAllWallets,
+  findWalletByAddressDb,
+  getAllWalletsDb,
+  upsertWalletDb
+} from '../repositories/wallet-repository.js';
 
 // ============================================================
 // MULTI-CHAIN CONFIG
@@ -125,23 +132,9 @@ export function getSupportedChains() {
   }));
 }
 
-// Persist wallets to JSON file
-const WALLET_FILE = join(process.cwd(), 'wallets.json');
-
-function loadWallets() {
-  if (existsSync(WALLET_FILE)) {
-    const data = JSON.parse(readFileSync(WALLET_FILE, 'utf-8'));
-    return new Map(Object.entries(data));
-  }
-  return new Map();
-}
-
-function saveWallets(wallets) {
-  const obj = Object.fromEntries(wallets);
-  writeFileSync(WALLET_FILE, JSON.stringify(obj, null, 2));
-}
-
-const wallets = loadWallets();
+// Wallet storage is handled via the WalletRepository abstraction
+const wallets = getWalletStore();
+const USE_DB = process.env.STORAGE_BACKEND === 'db';
 
 /**
  * Generate a random private key
@@ -154,7 +147,7 @@ function generatePrivateKey() {
 /**
  * Create a new wallet for an AI agent
  */
-export async function createWallet({ agentName, chain = 'base-sepolia' }) {
+export async function createWallet({ agentName, chain = 'base-sepolia', tenantId }) {
   try {
     const privateKey = generatePrivateKey();
     const account = privateKeyToAccount(privateKey);
@@ -170,8 +163,12 @@ export async function createWallet({ agentName, chain = 'base-sepolia' }) {
     };
 
     // Store wallet
-    wallets.set(walletId, wallet);
-    saveWallets(wallets);
+    if (USE_DB) {
+      await upsertWalletDb(wallet, { tenantId });
+    } else {
+      wallets.set(walletId, wallet);
+      persistWalletStore();
+    }
 
     console.log(`✅ Created wallet for ${agentName}: ${account.address}`);
 
@@ -189,8 +186,10 @@ export async function createWallet({ agentName, chain = 'base-sepolia' }) {
 /**
  * Get wallet balance
  */
-export async function getBalance(address, chain) {
-  const wallet = Array.from(wallets.values()).find(w => w.address === address);
+export async function getBalance(address, chain, { tenantId } = {}) {
+  const wallet = USE_DB
+    ? await findWalletByAddressDb(address, { tenantId })
+    : Array.from(wallets.values()).find(w => w.address === address);
 
   // Use wallet's chain if not specified, fallback to default
   const chainName = chain || wallet?.chain || DEFAULT_CHAIN;
@@ -219,8 +218,10 @@ export async function getBalance(address, chain) {
 /**
  * Sign and send a transaction
  */
-export async function signTransaction({ from, to, value, data = '0x', chain }) {
-  const wallet = Array.from(wallets.values()).find(w => w.address === from);
+export async function signTransaction({ from, to, value, data = '0x', chain, context = {}, tenantId }) {
+  const wallet = USE_DB
+    ? await findWalletByAddressDb(from, { tenantId })
+    : Array.from(wallets.values()).find(w => w.address === from);
 
   if (!wallet) {
     throw new Error(`Wallet not found: ${from}`);
@@ -230,11 +231,12 @@ export async function signTransaction({ from, to, value, data = '0x', chain }) {
   const chainName = chain || wallet.chain || DEFAULT_CHAIN;
   const chainConfig = getChainConfig(chainName);
 
-  const policyEvaluation = evaluateTransferPolicy({
+  const policyEvaluation = await evaluateTransferPolicy({
     walletAddress: from,
     to,
     valueEth: value,
-    chain: chainName
+    chain: chainName,
+    tenantId
   });
 
   if (!policyEvaluation.allowed) {
@@ -272,10 +274,15 @@ export async function signTransaction({ from, to, value, data = '0x', chain }) {
       from,
       to,
       value,
-      chain: chainName
+      chain: chainName,
+      policy: {
+        reason: policyEvaluation.reason,
+        context: policyEvaluation.context || null
+      },
+      meta: context || null
     };
-    logTransaction(txRecord);
-    recordPolicySpend({ walletAddress: from, valueEth: value });
+    await logTransaction(txRecord, { tenantId });
+    await recordPolicySpend({ walletAddress: from, valueEth: value, tenantId });
 
     return {
       hash,
@@ -314,8 +321,9 @@ function getExplorerUrl(chainName, txHash) {
 /**
  * Get all wallets (for admin)
  */
-export function getAllWallets() {
-  return Array.from(wallets.values()).map(w => ({
+export async function getAllWallets({ tenantId } = {}) {
+  const list = USE_DB ? await getAllWalletsDb({ tenantId }) : repoGetAllWallets();
+  return list.map(w => ({
     id: w.id,
     agentName: w.agentName,
     address: w.address,
@@ -334,16 +342,14 @@ export function getWalletById(id) {
 /**
  * Get wallet by address
  */
-export function getWalletByAddress(address) {
-  return Array.from(wallets.values()).find(w =>
-    w.address.toLowerCase() === address.toLowerCase()
-  );
+export async function getWalletByAddress(address, { tenantId } = {}) {
+  return USE_DB ? await findWalletByAddressDb(address, { tenantId }) : findWalletByAddress(address);
 }
 
 /**
  * Import an existing wallet from private key
  */
-export async function importWallet({ privateKey, agentName, chain = DEFAULT_CHAIN }) {
+export async function importWallet({ privateKey, agentName, chain = DEFAULT_CHAIN, tenantId }) {
   try {
     // Validate private key format
     if (!privateKey.startsWith('0x')) {
@@ -364,9 +370,11 @@ export async function importWallet({ privateKey, agentName, chain = DEFAULT_CHAI
     };
 
     // Check if wallet already exists
-    const existing = Array.from(wallets.values()).find(w =>
-      w.address.toLowerCase() === account.address.toLowerCase()
-    );
+    const existing = USE_DB
+      ? await findWalletByAddressDb(account.address, { tenantId })
+      : Array.from(wallets.values()).find(w =>
+          w.address.toLowerCase() === account.address.toLowerCase()
+        );
 
     if (existing) {
       return {
@@ -378,8 +386,12 @@ export async function importWallet({ privateKey, agentName, chain = DEFAULT_CHAI
       };
     }
 
-    wallets.set(walletId, wallet);
-    saveWallets(wallets);
+    if (USE_DB) {
+      await upsertWalletDb(wallet, { tenantId });
+    } else {
+      wallets.set(walletId, wallet);
+      persistWalletStore();
+    }
 
     console.log(`✅ Imported wallet: ${account.address}`);
 
@@ -457,8 +469,10 @@ export async function getMultiChainBalance(address) {
 /**
  * Estimate gas for a transaction
  */
-export async function estimateGas({ from, to, value, data = '0x', chain }) {
-  const wallet = Array.from(wallets.values()).find(w => w.address === from);
+export async function estimateGas({ from, to, value, data = '0x', chain, tenantId }) {
+  const wallet = USE_DB
+    ? await findWalletByAddressDb(from, { tenantId })
+    : Array.from(wallets.values()).find(w => w.address === from);
   const chainName = chain || wallet?.chain || DEFAULT_CHAIN;
   const chainConfig = getChainConfig(chainName);
 
@@ -493,8 +507,10 @@ export async function estimateGas({ from, to, value, data = '0x', chain }) {
 /**
  * Transfer all funds (sweep wallet)
  */
-export async function sweepWallet({ from, to, chain }) {
-  const wallet = Array.from(wallets.values()).find(w => w.address === from);
+export async function sweepWallet({ from, to, chain, tenantId }) {
+  const wallet = USE_DB
+    ? await findWalletByAddressDb(from, { tenantId })
+    : Array.from(wallets.values()).find(w => w.address === from);
   if (!wallet) throw new Error('Wallet not found');
 
   const chainName = chain || wallet.chain || DEFAULT_CHAIN;
@@ -525,11 +541,12 @@ export async function sweepWallet({ from, to, chain }) {
     }
 
     const amountToSendEth = formatEther(amountToSend);
-    const policyEvaluation = evaluateTransferPolicy({
+    const policyEvaluation = await evaluateTransferPolicy({
       walletAddress: from,
       to,
       valueEth: amountToSendEth,
-      chain: chainName
+      chain: chainName,
+      tenantId
     });
 
     if (!policyEvaluation.allowed) {
@@ -550,14 +567,18 @@ export async function sweepWallet({ from, to, chain }) {
       data: '0x'
     });
 
-    logTransaction({
+    await logTransaction({
       hash,
       from,
       to,
       value: amountToSendEth,
-      chain: chainName
-    });
-    recordPolicySpend({ walletAddress: from, valueEth: amountToSendEth });
+      chain: chainName,
+      policy: {
+        reason: policyEvaluation.reason,
+        context: policyEvaluation.context || null
+      }
+    }, { tenantId });
+    await recordPolicySpend({ walletAddress: from, valueEth: amountToSendEth, tenantId });
 
     return {
       hash,
