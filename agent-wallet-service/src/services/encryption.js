@@ -4,7 +4,6 @@
  */
 
 import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from 'crypto';
-import { readFileSync } from 'fs';
 
 const ALGORITHM = 'aes-256-gcm';
 const IV_LENGTH = 16;
@@ -17,17 +16,23 @@ function getEncryptionKey() {
   let key = process.env.WALLET_ENCRYPTION_KEY;
 
   if (!key) {
-    if (process.env.NODE_ENV === 'production') {
+    const isProduction = process.env.NODE_ENV === 'production';
+    
+    if (isProduction) {
       throw new Error('FATAL: WALLET_ENCRYPTION_KEY environment variable is required in production.');
     }
-    console.warn('⚠️  WALLET_ENCRYPTION_KEY not set. Using derived key from API key.');
-    // Fallback: derive from first API key (not ideal but better than nothing)
-    const apiKeys = JSON.parse(readFileSync('api-keys.json', 'utf-8'));
-    if (apiKeys.length > 0) {
-      key = apiKeys[0].key;
+    
+    // In non-production, allow explicit test key or a deterministic local fallback
+    const testKeyMaterial = process.env.TEST_WALLET_ENCRYPTION_KEY || 'local-dev-wallet-key';
+    
+    const envSalt = process.env.WALLET_ENCRYPTION_SALT || 'agent-wallet-service-salt';
+    cachedEncryptionKey = scryptSync(testKeyMaterial, envSalt, 32);
+    if (process.env.TEST_WALLET_ENCRYPTION_KEY) {
+      console.warn('⚠️  Using TEST_WALLET_ENCRYPTION_KEY. Set WALLET_ENCRYPTION_KEY for production.');
     } else {
-      throw new Error('No encryption key available. Set WALLET_ENCRYPTION_KEY env var.');
+      console.warn('⚠️  WALLET_ENCRYPTION_KEY not set; using local development fallback key. Set TEST_WALLET_ENCRYPTION_KEY (or WALLET_ENCRYPTION_KEY) explicitly.');
     }
+    return cachedEncryptionKey;
   }
 
   // Derive 32-byte key using scrypt

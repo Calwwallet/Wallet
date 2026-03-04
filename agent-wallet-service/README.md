@@ -107,7 +107,12 @@ On-chain identity for AI agents:
 
 - Generate/revoke API keys
 - Role-based permissions (read/write/admin)
-- Rate limiting built-in
+- Weighted rate limiting built-in (route-aware costs)
+- Tier-aware limits (`free`, `pro`, `enterprise`)
+- RPC mode by tier:
+  - `tier:free` => BYO RPC required on chain-call wallet routes
+  - `tier:pro` / `tier:enterprise` => managed RPC
+- Rate limit headers: `RateLimit-*`, `X-RateLimit-*`, `Retry-After`
 
 ### 🛡️ Policy Engine Guardrails
 
@@ -151,6 +156,30 @@ const balance = await wallet.getBalance(created.wallet.address);
 const tx = await wallet.send(created.wallet.address, '0x000000000000000000000000000000000000dead', '0.000001');
 console.log({ created, balance, tx });
 ```
+
+### Free tier: BYO RPC (Alchemy)
+
+Create a free key:
+
+```bash
+curl -X POST http://localhost:3000/api-keys \
+  -H 'Content-Type: application/json' \
+  -H "X-API-Key: $BOOTSTRAP_KEY" \
+  -d '{"name":"free-key","permissions":["read","write","tier:free"]}'
+```
+
+Use that key with your own RPC URL on chain-call wallet routes:
+
+```bash
+curl "http://localhost:3000/wallet/$FROM_WALLET/balance?chain=base-sepolia" \
+  -H "X-API-Key: $FREE_KEY" \
+  -H "X-RPC-URL: https://base-sepolia.g.alchemy.com/v2/<ALCHEMY_KEY>"
+```
+
+Supported BYO input fields:
+- Header: `X-RPC-URL`
+- Query: `?rpcUrl=...`
+- Body: `{ "rpcUrl": "..." }`
 
 ### First-run onboarding
 
@@ -213,15 +242,15 @@ GET  /wallet/list                        List all wallets
 GET  /wallet/chains                      Supported chains
 GET  /wallet/fees                        Fee configuration
 GET  /wallet/history                     Global transaction history
-GET  /wallet/tx/:hash                    Transaction status/receipt
-POST /wallet/estimate-gas                Estimate gas cost
+GET  /wallet/tx/:hash                    Transaction status/receipt (free tier requires BYO rpcUrl)
+POST /wallet/estimate-gas                Estimate gas cost (free tier requires BYO rpcUrl)
 
 GET  /wallet/:address                    Wallet details
-GET  /wallet/:address/balance            Balance on wallet chain (or ?chain=)
-GET  /wallet/:address/balance/all        Balance across all chains
+GET  /wallet/:address/balance            Balance on wallet chain (or ?chain=) (free tier requires BYO rpcUrl)
+GET  /wallet/:address/balance/all        Balance across all chains (managed tiers only)
 GET  /wallet/:address/history            Wallet transaction history
-POST /wallet/:address/send               Send transaction
-POST /wallet/:address/sweep              Sweep all funds
+POST /wallet/:address/send               Send transaction (free tier requires BYO rpcUrl)
+POST /wallet/:address/sweep              Sweep all funds (free tier requires BYO rpcUrl)
 ```
 
 ### Identity (ERC-8004)
@@ -254,9 +283,26 @@ GET  /ens/:name                          Resolve ENS details
 |---|---:|---|---|
 | Missing API key | 401 | `API key required` | Send `X-API-Key` header (or `?apiKey=` query param). |
 | Invalid API key | 403 | `Invalid API key` | Ensure the key exists and has not been revoked. |
+| Free-tier missing RPC URL | 400 | `Free-tier API keys must provide a BYO RPC URL` | Send `X-RPC-URL` header (or `rpcUrl` query/body). |
+| Free-tier balance/all call | 403 | `BYO RPC does not support /balance/all` | Use `GET /wallet/:address/balance?chain=...&rpcUrl=...` instead. |
 | Invalid chain | 400 or 500 | `Unsupported chain` / chain validation error | Call `GET /wallet/chains` and use one of the returned chain IDs. |
 | Insufficient funds | 500 | `insufficient funds` | Fund the sender on the same chain and reduce transfer amount to account for gas. |
 | RPC fallback failures | 500 | `All RPC endpoints failed` / transport errors | Retry shortly; verify RPC/network connectivity and try another supported chain. |
+
+## Rate limit tuning
+
+- Set `RATE_LIMIT_WINDOW_MS` (default: `60000`).
+- Set per-tier limits:
+  - `RATE_LIMIT_MAX_POINTS_FREE` (default: `100`)
+  - `RATE_LIMIT_MAX_POINTS_PRO` (default: `300`)
+  - `RATE_LIMIT_MAX_POINTS_ENTERPRISE` (default: `1000`)
+- Set request costs:
+  - `RATE_LIMIT_COST_READ` (default: `1`)
+  - `RATE_LIMIT_COST_WRITE` (default: `2`)
+  - `RATE_LIMIT_COST_EXPENSIVE` (default: `10`)
+- Assign tier on key creation via permission tag, e.g. `["read","write","tier:pro"]`.
+- Free-tier (`tier:free`) keys must provide BYO RPC URL (`X-RPC-URL`, `rpcUrl` query/body).
+- Restrict BYO hosts via `BYO_RPC_ALLOWED_HOSTS` (default: `*.g.alchemy.com,*.alchemy.com`).
 
 ## Architecture
 
@@ -272,8 +318,8 @@ src/
 │   ├── fee-collector.js        Fee calculations
 │   └── tx-history.js           Transaction logging
 └── middleware/
-    ├── auth.js                 API key auth
-    └── rateLimit.js            Rate limiting
+    ├── auth.js                 API key auth + weighted rate limiting
+    └── rateLimit.js            Legacy simple limiter (unused)
 ```
 
 ## Live Transaction

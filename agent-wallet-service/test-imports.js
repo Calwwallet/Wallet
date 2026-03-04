@@ -1,0 +1,16 @@
+import 'dotenv/config';
+console.log('1. dotenv ok');
+import express from 'express';
+console.log('2. express ok');
+import { logger } from './src/services/logger.js';
+console.log('3. logger ok');
+import { getDb } from './src/services/db.js';
+console.log('4. db ok');
+import { getAllWallets } from './src/services/viem-wallet.js';
+console.log('5. viem-wallet ok');
+import walletRoutes from './src/routes/wallet.js';
+console.log('6. walletRoutes ok');
+import ensRoutes from './src/routes/ens.js';
+console.log('7. ensRoutes ok');
+console.log('ALL IMPORTS TESTED');
+process.exit(0);

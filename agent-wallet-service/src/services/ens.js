@@ -5,24 +5,12 @@
 
 import { createPublicClient, http, formatEther } from 'viem';
 import { mainnet, sepolia } from 'viem/chains';
-import { readFileSync, writeFileSync, existsSync } from 'fs';
-import { join } from 'path';
+import {
+  getEnsRegistrations,
+  addEnsRegistration
+} from '../repositories/ens-registration-repository.js';
 
-// Storage
-const ENS_FILE = join(process.cwd(), 'ens-registrations.json');
-
-function loadRegistrations() {
-  if (existsSync(ENS_FILE)) {
-    return JSON.parse(readFileSync(ENS_FILE, 'utf-8'));
-  }
-  return [];
-}
-
-function saveRegistrations(regs) {
-  writeFileSync(ENS_FILE, JSON.stringify(regs, null, 2));
-}
-
-let registrations = loadRegistrations();
+let registrations = getEnsRegistrations();
 
 // Get RPC URL
 function getRpcUrl(chain) {
@@ -160,8 +148,7 @@ export async function prepareRegistration({ name, ownerAddress, durationYears = 
     status: 'ready'
   };
 
-  registrations.push(registration);
-  saveRegistrations(registrations);
+  addEnsRegistration(registration);
 
   return {
     success: true,

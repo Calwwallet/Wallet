@@ -13,15 +13,17 @@ class AgentWallet {
     const {
       baseUrl = 'http://localhost:3000',
       apiKey,
+      rpcUrl,
       timeoutMs = 10000
     } = options;
 
     this.baseUrl = baseUrl;
     this.apiKey = apiKey;
+    this.rpcUrl = rpcUrl;
     this.timeoutMs = timeoutMs;
   }
 
-  async #request(path, { method = 'GET', body, query } = {}) {
+  async #request(path, { method = 'GET', body, query, rpcUrl } = {}) {
     const pathString = String(path);
     const absoluteUrlPattern = /^https?:\/\//i;
     const url = absoluteUrlPattern.test(pathString)
@@ -48,6 +50,10 @@ class AgentWallet {
     }
     if (this.apiKey) {
       headers['X-API-Key'] = this.apiKey;
+    }
+    const resolvedRpcUrl = rpcUrl || this.rpcUrl;
+    if (resolvedRpcUrl) {
+      headers['X-RPC-URL'] = resolvedRpcUrl;
     }
 
     const controller = new AbortController();
@@ -93,6 +99,18 @@ class AgentWallet {
     return data;
   }
 
+  // =========================
+  // Core service helpers
+  // =========================
+
+  async health() {
+    return this.#request('/health');
+  }
+
+  async onboarding() {
+    return this.#request('/onboarding');
+  }
+
   /**
    * Create a new wallet for an agent
    */
@@ -109,8 +127,10 @@ class AgentWallet {
    */
   async getBalance(address, options = {}) {
     const chain = typeof options === 'string' ? options : options?.chain;
+    const rpcUrl = typeof options === 'object' ? options?.rpcUrl : undefined;
     return this.#request(`/wallet/${address}/balance`, {
-      query: { chain }
+      query: { chain, rpcUrl },
+      rpcUrl
     });
   }
 
@@ -120,9 +140,11 @@ class AgentWallet {
   async send(from, to, value, options = {}) {
     const chain = typeof options === 'string' ? options : options?.chain;
     const data = typeof options === 'object' ? options?.data : undefined;
+    const rpcUrl = typeof options === 'object' ? options?.rpcUrl : undefined;
     return this.#request(`/wallet/${from}/send`, {
       method: 'POST',
-      body: { to, value, chain, data }
+      body: { to, value, chain, data, rpcUrl },
+      rpcUrl
     });
   }
 
@@ -138,6 +160,112 @@ class AgentWallet {
    */
   async getFees() {
     return this.#request('/wallet/fees');
+  }
+
+  async listChains() {
+    return this.#request('/wallet/chains');
+  }
+
+  async getWallet(address) {
+    return this.#request(`/wallet/${address}`);
+  }
+
+  async getWalletHistory(address) {
+    return this.#request(`/wallet/${address}/history`);
+  }
+
+  async getGlobalHistory(limit) {
+    return this.#request('/wallet/history', {
+      query: { limit }
+    });
+  }
+
+  async getPolicy(address) {
+    return this.#request(`/wallet/policy/${address}`);
+  }
+
+  async setPolicy(address, body) {
+    return this.#request(`/wallet/policy/${address}`, {
+      method: 'PUT',
+      body
+    });
+  }
+
+  async evaluatePolicy(address, { to, value, chain, timestamp } = {}) {
+    return this.#request(`/wallet/policy/${address}/evaluate`, {
+      method: 'POST',
+      body: { to, value, chain, timestamp, dryRun: true }
+    });
+  }
+
+  // =========================
+  // Identity + agent helpers
+  // =========================
+
+  async createIdentity({ walletAddress, agentName, description, agentType, capabilities, metadata, owner, chain } = {}) {
+    return this.#request('/identity/create', {
+      method: 'POST',
+      body: { walletAddress, agentName, description, agentType, capabilities, metadata, owner, chain }
+    });
+  }
+
+  async listIdentities() {
+    return this.#request('/identity/list');
+  }
+
+  async getIdentity(agentId) {
+    return this.#request(`/identity/${agentId}`);
+  }
+
+  async getIdentityCredential(agentId) {
+    return this.#request(`/identity/${agentId}/credential`);
+  }
+
+  async issueIdentityCredential(agentId) {
+    return this.#request(`/identity/${agentId}/credential/issue`, {
+      method: 'POST'
+    });
+  }
+
+  async generateIdentityProof(agentId) {
+    return this.#request(`/identity/${agentId}/proof`, {
+      method: 'POST'
+    });
+  }
+
+  async payAsAgent(agentId, { to, amountEth, chain, memo, dryRun = false } = {}) {
+    return this.#request(`/identity/${agentId}/pay`, {
+      method: 'POST',
+      body: { to, amountEth, chain, memo, dryRun }
+    });
+  }
+
+  // =========================
+  // ENS helpers
+  // =========================
+
+  async checkEns(name, options = {}) {
+    const chain = typeof options === 'string' ? options : options?.chain;
+    return this.#request(`/ens/check/${name}`, {
+      query: { chain }
+    });
+  }
+
+  async getEnsPrice(name, { years = 1, chain } = {}) {
+    return this.#request(`/ens/price/${name}`, {
+      query: { years, chain }
+    });
+  }
+
+  async prepareEnsRegistration({ name, ownerAddress, durationYears = 1, chain } = {}) {
+    return this.#request('/ens/register', {
+      method: 'POST',
+      body: { name, ownerAddress, durationYears, chain }
+    });
+  }
+
+  async listEnsRegistrations() {
+    return this.#request('/ens/list');
   }
 }
 

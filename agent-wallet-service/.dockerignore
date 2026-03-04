@@ -1,0 +1,10 @@
+node_modules
+*.log
+.env
+.env.local
+data
+logs
+*.md
+tests/
+demo.js
+cli.js

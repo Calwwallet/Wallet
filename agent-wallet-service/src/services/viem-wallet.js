@@ -5,7 +5,7 @@
  */
 
 import 'dotenv/config';
-import { createWalletClient, createPublicClient, http, parseEther, formatEther } from 'viem';
+import { createWalletClient, createPublicClient, http, parseEther, formatEther, parseUnits, encodeFunctionData } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import {
   baseSepolia, base, mainnet, sepolia,
@@ -15,7 +15,7 @@ import {
 import { randomBytes } from 'crypto';
 import { logTransaction } from './tx-history.js';
 import { encrypt, decrypt } from './encryption.js';
-import { evaluateTransferPolicy, recordPolicySpend } from './policy-engine.js';
+import { evaluateTransferPolicy, recordPolicySpend, recordPolicySpendUsd, checkPendingApproval } from './policy-engine.js';
 import {
   getWalletStore,
   persistWalletStore,
@@ -81,12 +81,89 @@ const CHAINS = {
 };
 
 // Default chain
+import { getAllowedHostPatterns, isLocalHost, hostMatchesPattern } from '../middleware/rpc-access.js';
+
 const DEFAULT_CHAIN = 'base-sepolia';
+const BYO_RPC_HINT = 'Provide X-RPC-URL header, ?rpcUrl query param, or rpcUrl in request body.';
+
+/**
+ * Validate that a BYO RPC URL is from an allowed host
+ * This prevents users from making the service proxy requests to arbitrary destinations
+ */
+function validateByoRpcUrl(rpcUrl) {
+  try {
+    const url = new URL(rpcUrl);
+    const hostname = url.hostname.toLowerCase();
+    
+    // Allow localhost for development
+    if (isLocalHost(hostname)) {
+      return true;
+    }
+    
+    // Check against allowed host patterns
+    const allowedPatterns = getAllowedHostPatterns();
+    const isAllowed = allowedPatterns.some(pattern => hostMatchesPattern(hostname, pattern));
+    
+    if (!isAllowed) {
+      throw new Error(
+        `BYO_RPC_HOST_NOT_ALLOWED: RPC URL host '${hostname}' is not in allowed list. ` +
+        `Allowed: ${allowedPatterns.join(', ')}. ` +
+        `Set BYO_RPC_ALLOWED_HOSTS environment variable to configure.`
+      );
+    }
+    
+    return true;
+  } catch (error) {
+    if (error.message.startsWith('BYO_RPC_HOST_NOT_ALLOWED')) {
+      throw error;
+    }
+    throw new Error(`BYO_RPC_INVALID_URL: Invalid RPC URL: ${error.message}`);
+  }
+}
+
+function resolveRpcMode({ tier, rpcMode } = {}) {
+  if (rpcMode === 'byo' || rpcMode === 'managed') return rpcMode;
+  return tier === 'free' ? 'byo' : 'managed';
+}
+
+function normalizeRuntimeRpcUrl(raw) {
+  const value = typeof raw === 'string' ? raw.trim() : '';
+  if (!value) return null;
+
+  try {
+    return new URL(value).toString();
+  } catch {
+    throw new Error('Invalid rpcUrl format.');
+  }
+}
+
+function resolveChainConfigForRequest(chainName, options = {}) {
+  const chainConfig = getChainConfig(chainName);
+  const mode = resolveRpcMode(options);
+
+  if (mode !== 'byo') {
+    return chainConfig;
+  }
+
+  const rpcUrl = normalizeRuntimeRpcUrl(options.rpcUrl);
+  if (!rpcUrl) {
+    throw new Error(`BYO_RPC_REQUIRED: free-tier requests must include rpcUrl. ${BYO_RPC_HINT}`);
+  }
+  
+  // Validate the RPC URL is from an allowed host
+  validateByoRpcUrl(rpcUrl);
+  
+  // BYO mode intentionally disables managed RPC fallback to protect infra costs.
+  return {
+    ...chainConfig,
+    rpcs: [rpcUrl]
+  };
+}
 
 /**
  * Get chain config by name
  */
-function getChainConfig(chainName) {
+export function getChainConfig(chainName) {
   const config = CHAINS[chainName];
   if (!config) {
     throw new Error(`Unsupported chain: ${chainName}. Supported: ${Object.keys(CHAINS).join(', ')}`);
@@ -186,14 +263,15 @@ export async function createWallet({ agentName, chain = 'base-sepolia', tenantId
 /**
  * Get wallet balance
  */
-export async function getBalance(address, chain, { tenantId } = {}) {
+export async function getBalance(address, chain, options = {}) {
+  const { tenantId } = options;
   const wallet = USE_DB
     ? await findWalletByAddressDb(address, { tenantId })
     : Array.from(wallets.values()).find(w => w.address === address);
 
   // Use wallet's chain if not specified, fallback to default
   const chainName = chain || wallet?.chain || DEFAULT_CHAIN;
-  const chainConfig = getChainConfig(chainName);
+  const chainConfig = resolveChainConfigForRequest(chainName, options);
 
   if (!wallet) {
     throw new Error(`Wallet not found: ${address}`);
@@ -218,7 +296,18 @@ export async function getBalance(address, chain, { tenantId } = {}) {
 /**
  * Sign and send a transaction
  */
-export async function signTransaction({ from, to, value, data = '0x', chain, context = {}, tenantId }) {
+export async function signTransaction({
+  from,
+  to,
+  value,
+  data = '0x',
+  chain,
+  context = {},
+  tenantId,
+  tier,
+  rpcMode,
+  rpcUrl
+}) {
   const wallet = USE_DB
     ? await findWalletByAddressDb(from, { tenantId })
     : Array.from(wallets.values()).find(w => w.address === from);
@@ -229,36 +318,48 @@ export async function signTransaction({ from, to, value, data = '0x', chain, con
 
   // Use provided chain or wallet's chain
   const chainName = chain || wallet.chain || DEFAULT_CHAIN;
-  const chainConfig = getChainConfig(chainName);
+  const chainConfig = resolveChainConfigForRequest(chainName, { tier, rpcMode, rpcUrl });
 
   const policyEvaluation = await evaluateTransferPolicy({
     walletAddress: from,
+    fromAddress: from, // Pass fromAddress for proper policy evaluation
     to,
     valueEth: value,
     chain: chainName,
     tenantId
   });
 
+  // Handle HITL (Human-in-the-Loop) approval
   if (!policyEvaluation.allowed) {
+    if (policyEvaluation.reason === 'requires_human_approval') {
+      // Return pending approval info instead of throwing
+      return {
+        success: false,
+        requiresApproval: true,
+        pendingApprovalId: policyEvaluation.pendingApprovalId,
+        message: 'Transaction requires human approval',
+        expiresAt: policyEvaluation.context?.expiresAt,
+        policy: policyEvaluation.policy
+      };
+    }
     throw new Error(`Policy blocked transaction (${policyEvaluation.reason})`);
   }
 
+  let decryptedKey;
   try {
     // Decrypt private key for use
-    const decryptedKey = decrypt(wallet.privateKey);
+    // SECURITY NOTE: Private key is decrypted in memory during transaction signing.
+    // This is inherent to hot wallet architecture. For production, consider:
+    // - Hardware Security Modules (HSM)
+    // - Intel SGX / ARM TrustZone enclaves
+    // - External signing services (e.g., Fireblocks, BitGo)
+    decryptedKey = decrypt(wallet.privateKey);
     const account = privateKeyToAccount(decryptedKey);
 
-    const { client } = await createClientWithFallback(
+    const { client: walletClient } = await createClientWithFallback(
       { ...chainConfig, account },
       'wallet'
     );
-
-    // Re-create with account for wallet client
-    const walletClient = createWalletClient({
-      account,
-      chain: chainConfig.chain,
-      transport: http(chainConfig.rpcs[0])
-    });
 
     const hash = await walletClient.sendTransaction({
       to,
@@ -283,6 +384,11 @@ export async function signTransaction({ from, to, value, data = '0x', chain, con
     };
     await logTransaction(txRecord, { tenantId });
     await recordPolicySpend({ walletAddress: from, valueEth: value, tenantId });
+    
+    // Also record USD spending for USD-based policy tracking
+    if (policyEvaluation.context?.valueUsd) {
+      await recordPolicySpendUsd({ walletAddress: from, valueUsd: policyEvaluation.context.valueUsd, tenantId });
+    }
 
     return {
       hash,
@@ -296,6 +402,15 @@ export async function signTransaction({ from, to, value, data = '0x', chain, con
   } catch (error) {
     console.error('Failed to send transaction:', error);
     throw error;
+  } finally {
+    // Zero out the decrypted key from memory after use
+    // Note: JavaScript doesn't guarantee immediate memory release, but this signals intent
+    if (decryptedKey) {
+      // Key will be garbage collected - explicit zeroing isn't possible in JS
+      // but we log for audit purposes
+      console.debug('Private key used for signing, removed from active scope');
+      decryptedKey = null;
+    }
   }
 }
 
@@ -410,8 +525,8 @@ export async function importWallet({ privateKey, agentName, chain = DEFAULT_CHAI
 /**
  * Get transaction receipt
  */
-export async function getTransactionReceipt(txHash, chainName = DEFAULT_CHAIN) {
-  const chainConfig = getChainConfig(chainName);
+export async function getTransactionReceipt(txHash, chainName = DEFAULT_CHAIN, options = {}) {
+  const chainConfig = resolveChainConfigForRequest(chainName, options);
 
   try {
     const { client } = await createClientWithFallback(chainConfig, 'public');
@@ -440,7 +555,11 @@ export async function getTransactionReceipt(txHash, chainName = DEFAULT_CHAIN) {
 /**
  * Get balance across all chains
  */
-export async function getMultiChainBalance(address) {
+export async function getMultiChainBalance(address, options = {}) {
+  if (resolveRpcMode(options) === 'byo') {
+    throw new Error('BYO_RPC_MULTI_CHAIN_NOT_SUPPORTED: free-tier BYO RPC does not support /balance/all.');
+  }
+
   const requests = Object.entries(CHAINS).map(async ([chainName, config]) => {
     try {
       const { client } = await createClientWithFallback(config, 'public');
@@ -469,12 +588,12 @@ export async function getMultiChainBalance(address) {
 /**
  * Estimate gas for a transaction
  */
-export async function estimateGas({ from, to, value, data = '0x', chain, tenantId }) {
+export async function estimateGas({ from, to, value, data = '0x', chain, tenantId, tier, rpcMode, rpcUrl }) {
   const wallet = USE_DB
     ? await findWalletByAddressDb(from, { tenantId })
     : Array.from(wallets.values()).find(w => w.address === from);
   const chainName = chain || wallet?.chain || DEFAULT_CHAIN;
-  const chainConfig = getChainConfig(chainName);
+  const chainConfig = resolveChainConfigForRequest(chainName, { tier, rpcMode, rpcUrl });
 
   try {
     const { client } = await createClientWithFallback(chainConfig, 'public');
@@ -507,14 +626,14 @@ export async function estimateGas({ from, to, value, data = '0x', chain, tenantI
 /**
  * Transfer all funds (sweep wallet)
  */
-export async function sweepWallet({ from, to, chain, tenantId }) {
+export async function sweepWallet({ from, to, chain, tenantId, tier, rpcMode, rpcUrl }) {
   const wallet = USE_DB
     ? await findWalletByAddressDb(from, { tenantId })
     : Array.from(wallets.values()).find(w => w.address === from);
   if (!wallet) throw new Error('Wallet not found');
 
   const chainName = chain || wallet.chain || DEFAULT_CHAIN;
-  const chainConfig = getChainConfig(chainName);
+  const chainConfig = resolveChainConfigForRequest(chainName, { tier, rpcMode, rpcUrl });
 
   try {
     const { client: publicClient } = await createClientWithFallback(chainConfig, 'public');
@@ -550,6 +669,17 @@ export async function sweepWallet({ from, to, chain, tenantId }) {
     });
 
     if (!policyEvaluation.allowed) {
+      // Handle HITL (Human-in-the-Loop) approval
+      if (policyEvaluation.reason === 'requires_human_approval') {
+        return {
+          success: false,
+          requiresApproval: true,
+          pendingApprovalId: policyEvaluation.pendingApprovalId,
+          message: 'Sweep requires human approval',
+          expiresAt: policyEvaluation.context?.expiresAt,
+          policy: policyEvaluation.policy
+        };
+      }
       throw new Error(`Policy blocked sweep (${policyEvaluation.reason})`);
     }
 
@@ -579,6 +709,11 @@ export async function sweepWallet({ from, to, chain, tenantId }) {
       }
     }, { tenantId });
     await recordPolicySpend({ walletAddress: from, valueEth: amountToSendEth, tenantId });
+    
+    // Also record USD spending for USD-based policy tracking
+    if (policyEvaluation.context?.valueUsd) {
+      await recordPolicySpendUsd({ walletAddress: from, valueUsd: policyEvaluation.context.valueUsd, tenantId });
+    }
 
     return {
       hash,
@@ -592,5 +727,102 @@ export async function sweepWallet({ from, to, chain, tenantId }) {
   } catch (error) {
     console.error('Sweep failed:', error);
     throw error;
+  }
+}
+
+// ERC-20 Token ABI (transfer function)
+const ERC20_ABI = [
+  {
+    name: 'transfer',
+    type: 'function',
+    inputs: [
+      { name: 'to', type: 'address' },
+      { name: 'amount', type: 'uint256' }
+    ],
+    outputs: [{ name: '', type: 'bool' }],
+    stateMutability: 'nonpayable'
+  }
+];
+
+/**
+ * Transfer ERC-20 tokens
+ * @param {string} from - Sender wallet address
+ * @param {string} to - Recipient wallet address  
+ * @param {string} tokenAddress - ERC-20 token contract address
+ * @param {string} amount - Amount to transfer (in human-readable format, e.g., "10.5")
+ * @param {number} decimals - Token decimals (default 18)
+ * @param {string} chain - Chain name
+ * @param {object} options - Options including tenantId, tier, rpcMode, rpcUrl
+ */
+export async function transferErc20({ 
+  from, 
+  to, 
+  tokenAddress, 
+  amount, 
+  decimals = 18,
+  chain = DEFAULT_CHAIN,
+  ...options 
+}) {
+  const { tenantId, tier, rpcMode, rpcUrl } = options;
+  
+  // Get wallet
+  const wallet = USE_DB
+    ? await findWalletByAddressDb(from, { tenantId })
+    : findWalletByAddress(from);
+  
+  if (!wallet) {
+    throw new Error(`Wallet not found: ${from}`);
+  }
+
+  // Get chain config
+  const chainName = chain || wallet.chain || DEFAULT_CHAIN;
+  const chainConfig = resolveChainConfigForRequest(chainName, { tier, rpcMode, rpcUrl });
+
+  let decryptedKey;
+  try {
+    // Decrypt private key
+    decryptedKey = decrypt(wallet.privateKey);
+    const account = privateKeyToAccount(decryptedKey);
+
+    const walletClient = createWalletClient({
+      account,
+      chain: chainConfig.chain,
+      transport: http(chainConfig.rpcs[0])
+    });
+
+    // Encode ERC-20 transfer data
+    const amountWei = parseUnits(amount, decimals);
+    const data = encodeFunctionData({
+      abi: ERC20_ABI,
+      functionName: 'transfer',
+      args: [to, amountWei]
+    });
+
+    // Send transaction
+    const hash = await walletClient.sendTransaction({
+      to: tokenAddress,
+      value: 0n,
+      data
+    });
+
+    console.log(`✅ ERC-20 token transfer on ${chainName}: ${hash}`);
+
+    return {
+      hash,
+      from,
+      to,
+      tokenAddress,
+      amount,
+      amountWei: amountWei.toString(),
+      chain: chainName,
+      explorer: getExplorerUrl(chainName, hash)
+    };
+  } catch (error) {
+    console.error('ERC-20 transfer failed:', error);
+    throw error;
+  } finally {
+    if (decryptedKey) {
+      decryptedKey = null;
+    }
   }
 }

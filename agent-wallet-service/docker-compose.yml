@@ -1,0 +1,136 @@
+# ===========================================
+# Agent Wallet Service - Docker Compose
+# ===========================================
+# Local development and production deployment
+#
+# Usage:
+#   Development: docker-compose up -d
+#   Production:  docker-compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+# ===========================================
+
+services:
+  # -----------------------------------------------------
+  # Main Application
+  # -----------------------------------------------------
+  agent-wallet-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: ${DOCKER_TARGET:-development}
+    container_name: agent-wallet-service
+    restart: unless-stopped
+    ports:
+      - "${PORT:-3000}:3000"
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=${NODE_ENV:-development}
+    volumes:
+      # Persist wallet data and API keys
+      - wallet_data:/app/data
+      # Optional: mount logs for debugging
+      - wallet_logs:/app/logs
+    depends_on:
+      redis:
+        condition: service_optional_started
+      postgres:
+        condition: service_optional_started
+    networks:
+      - agent-wallet-network
+    # Resource limits (adjust for production)
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: '1.0'
+        reservations:
+          memory: 256M
+          cpus: '0.25'
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    # Logging
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # -----------------------------------------------------
+  # Redis (Optional - for rate limiting)
+  # -----------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: agent-wallet-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    networks:
+      - agent-wallet-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # -----------------------------------------------------
+  # PostgreSQL (Optional - for DB-backed storage)
+  # -----------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: agent-wallet-postgres
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-agentwallet}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - agent-wallet-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # -----------------------------------------------------
+  # Adminer (Optional - Database GUI)
+  # -----------------------------------------------------
+  adminer:
+    image: adminer:latest
+    container_name: agent-wallet-adminer
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    depends_on:
+      - postgres
+    networks:
+      - agent-wallet-network
+    # Only enable in development
+    profiles:
+      - dev
+
+# -----------------------------------------------------
+# Networks
+# -----------------------------------------------------
+networks:
+  agent-wallet-network:
+    driver: bridge
+
+# -----------------------------------------------------
+# Volumes (for data persistence)
+# -----------------------------------------------------
+volumes:
+  wallet_data:
+  wallet_logs:
+  redis_data:
+  postgres_data:

@@ -1,3 +1,9 @@
 # Local dependency trees
 agent-wallet-service/node_modules/
 agent-wallet-service-src/node_modules/
+
+# Local/runtime artifacts that can contain secrets
+agent-wallet-service/.env.local
+agent-wallet-service/data/agent-registry.json
+agent-wallet-service-src/agent-wallet-service/api-keys.json
+agent-wallet-service-src/agent-wallet-service/database.sqlite
