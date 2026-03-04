@@ -1,0 +1,61 @@
+{
+  "agent:dfc3ed2249adb4da": {
+    "@context": "https://eips.ethereum.org/EIPS/eip-8004",
+    "id": "agent:dfc3ed2249adb4da",
+    "version": "1.0.0",
+    "name": "TestAgent",
+    "description": "TestAgent AI Agent",
+    "type": "assistant",
+    "wallet": "0x4CE95771015Df1B1EbA4e65f8121768b4850AD3f",
+    "owner": "0x4CE95771015Df1B1EbA4e65f8121768b4850AD3f",
+    "capabilities": [
+      {
+        "type": "wallet",
+        "granted": true,
+        "grantedAt": "2026-02-28T00:22:52.091Z"
+      },
+      {
+        "type": "messaging",
+        "granted": true,
+        "grantedAt": "2026-02-28T00:22:52.093Z"
+      }
+    ],
+    "metadata": {
+      "createdAt": "2026-02-28T00:22:52.093Z",
+      "chain": "base-sepolia",
+      "standard": "ERC-8004"
+    },
+    "verification": {
+      "hash": "0xdfc3ed2249adb4da9f8e8e7c0c60edb79646d7d0f2dc52d9b881bb4d5afe87da",
+      "timestamp": 1772238172090,
+      "salt": "5926fd228483ea85c2a4e58236832fc3b2658ec2ba0901ac94af386521a49a06"
+    }
+  },
+  "agent:1fc7609b74d99e8d": {
+    "@context": "https://eips.ethereum.org/EIPS/eip-8004",
+    "id": "agent:1fc7609b74d99e8d",
+    "version": "1.0.0",
+    "name": "TestAgent",
+    "description": "TestAgent AI Agent",
+    "type": "assistant",
+    "wallet": "0x123",
+    "owner": "0x123",
+    "capabilities": [
+      {
+        "type": "wallet",
+        "granted": true,
+        "grantedAt": "2026-03-01T11:08:35.280Z"
+      }
+    ],
+    "metadata": {
+      "createdAt": "2026-03-01T11:08:35.280Z",
+      "chain": "base-sepolia",
+      "standard": "ERC-8004"
+    },
+    "verification": {
+      "hash": "0x1fc7609b74d99e8d8fd279680897e31dfd4ac5de61d91d98b660245e819ae7de",
+      "timestamp": 1772363315204,
+      "salt": "0aab67e496e11a4f4c373d4f828f47351b15265283dcb31147335d31d2a85146"
+    }
+  }
+}

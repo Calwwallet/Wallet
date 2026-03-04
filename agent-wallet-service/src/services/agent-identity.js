@@ -5,13 +5,22 @@
  * https://eips.ethereum.org/EIPS/eip-8004
  */
 
-import { readFileSync, writeFileSync, existsSync } from 'fs';
-import { join } from 'path';
 import { randomBytes, createHash } from 'crypto';
+import { privateKeyToAccount } from 'viem/accounts';
+import { decrypt } from './encryption.js';
+import { getWalletByAddress as getWalletForIdentity } from './viem-wallet.js';
+import {
+  getIdentityStore,
+  persistIdentityStore,
+  getIdentityById,
+  setIdentity,
+  getAllIdentities,
+  getIdentityByIdDb,
+  setIdentityDb,
+  getAllIdentitiesDb
+} from '../repositories/identity-repository.js';
 
-const IDENTITY_FILE = join(process.cwd(), 'agent-identities.json');
-
-// ERC-8004 compliant identity structure
+// ERC-8004-inspired identity schema metadata
 const ERC8004_SCHEMA = {
   version: '1.0.0',
   standard: 'ERC-8004',
@@ -19,19 +28,31 @@ const ERC8004_SCHEMA = {
   capabilities: ['wallet', 'messaging', 'data_access', 'code_execution', 'external_api']
 };
 
-// Load identities
-function loadIdentities() {
-  if (existsSync(IDENTITY_FILE)) {
-    return JSON.parse(readFileSync(IDENTITY_FILE, 'utf-8'));
+// Process-local identity store is managed by the repository
+const USE_DB = process.env.STORAGE_BACKEND === 'db';
+const identities = USE_DB ? null : getIdentityStore();
+
+// ============================================================
+// SHARED HELPER FUNCTIONS
+// ============================================================
+
+/**
+ * Get the signing account for an agent's wallet
+ * @param {string} walletAddress - The wallet address to sign with
+ * @param {string} tenantId - Optional tenant ID for multi-tenant lookups
+ * @returns {Promise<{ account: import('viem').Account, walletAddress: string }>}
+ * @throws Error if wallet not found
+ */
+async function getSigningAccountForWallet(walletAddress, tenantId) {
+  const wallet = await getWalletForIdentity(walletAddress, { tenantId });
+  if (!wallet) {
+    throw new Error('Wallet for identity not found');
   }
-  return {};
-}
 
-function saveIdentities(identities) {
-  writeFileSync(IDENTITY_FILE, JSON.stringify(identities, null, 2));
+  const privateKey = decrypt(wallet.privateKey);
+  const account = privateKeyToAccount(privateKey);
+  return { account, walletAddress: wallet.address };
 }
-
-const identities = loadIdentities();
 
 /**
  * Generate unique agent ID (ERC-8004 compliant)
@@ -61,7 +82,8 @@ export async function createAgentIdentity({
   capabilities = ['wallet'],
   metadata = {},
   owner,
-  chain = 'base-sepolia'
+  chain = 'base-sepolia',
+  tenantId
 }) {
   try {
     // Validate agent type
@@ -77,6 +99,7 @@ export async function createAgentIdentity({
       '@context': 'https://eips.ethereum.org/EIPS/eip-8004',
       id: agentId.id,
       version: ERC8004_SCHEMA.version,
+      schemaVersion: '1.0.0',
       
       // Agent identification
       name: agentName,
@@ -111,8 +134,12 @@ export async function createAgentIdentity({
     };
 
     // Store identity
-    identities[agentId.id] = identity;
-    saveIdentities(identities);
+    if (USE_DB) {
+      await setIdentityDb(agentId.id, identity, { tenantId });
+    } else {
+      identities[agentId.id] = identity;
+      persistIdentityStore();
+    }
 
     console.log(`✅ Created ERC-8004 identity: ${agentId.id}`);
 
@@ -126,31 +153,30 @@ export async function createAgentIdentity({
 /**
  * Get agent identity by ID
  */
-export function getIdentity(agentId) {
-  return identities[agentId] || null;
+export async function getIdentity(agentId, { tenantId } = {}) {
+  return USE_DB ? await getIdentityByIdDb(agentId, { tenantId }) : getIdentityById(agentId);
 }
 
 /**
  * Get all identities for a wallet
  */
-export function getIdentitiesByWallet(walletAddress) {
-  return Object.values(identities).filter(
-    id => id.wallet.toLowerCase() === walletAddress.toLowerCase()
-  );
+export async function getIdentitiesByWallet(walletAddress, { tenantId } = {}) {
+  const all = USE_DB ? await getAllIdentitiesDb({ tenantId }) : getAllIdentities();
+  return all.filter((id) => id.wallet.toLowerCase() === walletAddress.toLowerCase());
 }
 
 /**
  * List all identities
  */
-export function listIdentities() {
-  return Object.values(identities);
+export async function listIdentities({ tenantId } = {}) {
+  return USE_DB ? await getAllIdentitiesDb({ tenantId }) : getAllIdentities();
 }
 
 /**
  * Update agent capability
  */
-export function updateCapability(agentId, capability, granted) {
-  const identity = identities[agentId];
+export async function updateCapability(agentId, capability, granted, { tenantId } = {}) {
+  const identity = USE_DB ? await getIdentityByIdDb(agentId, { tenantId }) : identities[agentId];
   if (!identity) throw new Error('Identity not found');
 
   const capIndex = identity.capabilities.findIndex(c => c.type === capability);
@@ -167,8 +193,12 @@ export function updateCapability(agentId, capability, granted) {
   }
 
   identity.metadata.updatedAt = new Date().toISOString();
-  identities[agentId] = identity;
-  saveIdentities(identities);
+  if (USE_DB) {
+    await setIdentityDb(agentId, identity, { tenantId });
+  } else {
+    identities[agentId] = identity;
+    persistIdentityStore();
+  }
 
   return identity;
 }
@@ -176,46 +206,56 @@ export function updateCapability(agentId, capability, granted) {
 /**
  * Revoke agent identity
  */
-export function revokeIdentity(agentId) {
-  if (!identities[agentId]) return false;
-  
-  identities[agentId].metadata.revokedAt = new Date().toISOString();
-  identities[agentId].metadata.status = 'revoked';
-  saveIdentities(identities);
-  
+export async function revokeIdentity(agentId, { tenantId } = {}) {
+  const identity = USE_DB ? await getIdentityByIdDb(agentId, { tenantId }) : identities[agentId];
+  if (!identity) return false;
+
+  identity.metadata.revokedAt = new Date().toISOString();
+  identity.metadata.status = 'revoked';
+
+  if (USE_DB) {
+    await setIdentityDb(agentId, identity, { tenantId });
+  } else {
+    identities[agentId] = identity;
+    persistIdentityStore();
+  }
+
   return true;
 }
 
 /**
- * Generate verification proof
+ * Generate verification proof signed by the agent wallet.
  */
-export function generateVerificationProof(agentId) {
-  const identity = identities[agentId];
+export async function generateVerificationProof(agentId, { tenantId } = {}) {
+  const identity = USE_DB ? await getIdentityByIdDb(agentId, { tenantId }) : identities[agentId];
   if (!identity) throw new Error('Identity not found');
 
-  // Create message to sign
+  const timestamp = Date.now();
   const message = JSON.stringify({
     agentId: identity.id,
     wallet: identity.wallet,
-    timestamp: Date.now()
+    timestamp
   });
 
-  // Note: In production, sign with agent's wallet private key
-  
+  const { account } = await getSigningAccountForWallet(identity.wallet, tenantId);
+  const signature = await account.signMessage({ message });
+
   return {
     agentId: identity.id,
     wallet: identity.wallet,
     message,
-    timestamp: Date.now(),
+    timestamp,
+    signature,
+    algorithm: 'secp256k1',
     valid: true
   };
 }
 
 /**
- * Export identity as verifiable credential (W3C compatible)
+ * Export identity as unsigned verifiable credential (W3C compatible)
  */
-export function exportVerifiableCredential(agentId) {
-  const identity = identities[agentId];
+export async function exportVerifiableCredential(agentId, { tenantId } = {}) {
+  const identity = USE_DB ? await getIdentityByIdDb(agentId, { tenantId }) : (identities || {})[agentId];
   if (!identity) throw new Error('Identity not found');
 
   return {
@@ -237,6 +277,60 @@ export function exportVerifiableCredential(agentId) {
       type: 'EthereumEip712Signature2021',
       verificationMethod: identity.wallet,
       proofPurpose: 'assertionMethod'
+    }
+  };
+}
+
+/**
+ * Issue a verifiable credential signed by the agent wallet.
+ */
+export async function issueVerifiableCredential(agentId, { tenantId } = {}) {
+  const identity = USE_DB ? await getIdentityByIdDb(agentId, { tenantId }) : identities[agentId];
+  if (!identity) throw new Error('Identity not found');
+  const base = USE_DB ? (() => {
+    // Build VC from fetched identity without relying on in-memory store
+    return {
+      '@context': [
+        'https://www.w3.org/2018/credentials/v1',
+        'https://eips.ethereum.org/EIPS/eip-8004'
+      ],
+      id: identity.id,
+      type: ['VerifiableCredential', 'AgentIdentityCredential'],
+      issuer: identity.wallet,
+      issuanceDate: identity.metadata.createdAt,
+      credentialSubject: {
+        id: identity.id,
+        name: identity.name,
+        type: identity.type,
+        capabilities: identity.capabilities
+      },
+      proof: {
+        type: 'EthereumEip712Signature2021',
+        verificationMethod: identity.wallet,
+        proofPurpose: 'assertionMethod'
+      }
+    };
+  })() : exportVerifiableCredential(agentId);
+
+  const { account } = await getSigningAccountForWallet(identity.wallet, tenantId);
+
+  const issuanceTime = new Date().toISOString();
+  const toSign = JSON.stringify({
+    vcId: base.id,
+    subject: base.credentialSubject?.id,
+    issuer: base.issuer,
+    issuanceDate: issuanceTime
+  });
+
+  const signature = await account.signMessage({ message: toSign });
+
+  return {
+    ...base,
+    issuanceDate: issuanceTime,
+    proof: {
+      ...base.proof,
+      created: issuanceTime,
+      jws: signature
     }
   };
 }

@@ -9,7 +9,7 @@
     "dev": "node --watch src/index.js",
     "demo": "node demo.js",
     "cli": "node cli.js",
-    "test": "node tests/test-wallet.js"
+    "test": "npm --prefix ./agent-wallet-service test"
   },
   "keywords": [
     "ai",

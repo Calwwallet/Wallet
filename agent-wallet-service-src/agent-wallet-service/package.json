@@ -1,0 +1,50 @@
+{
+  "name": "agent-wallet-service",
+  "version": "0.1.0",
+  "description": "Stripe for AI Agent Wallets — Add wallet functionality to any AI agent in seconds",
+  "main": "src/index.js",
+  "type": "module",
+  "bin": {
+    "claw": "./cli.js"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "demo": "node demo.js",
+    "cli": "node cli.js",
+    "doctor": "node doctor.js",
+    "test": "node tests/run-tests.js"
+  },
+  "keywords": [
+    "ai",
+    "agent",
+    "wallet",
+    "crypto",
+    "ethereum",
+    "base",
+    "blockchain",
+    "viem"
+  ],
+  "author": "Mr. Claw",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mrclaw/agent-wallet-service"
+  },
+  "dependencies": {
+    "@coinbase/agentkit": "^0.2.3",
+    "better-sqlite3": "^12.6.2",
+    "cors": "^2.8.6",
+    "dotenv": "^16.4.0",
+    "express": "^4.18.2",
+    "swagger-jsdoc": "^6.2.8",
+    "swagger-ui-express": "^5.0.1",
+    "viem": "^2.21.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "devDependencies": {
+    "jest": "^30.2.0"
+  }
+}

@@ -24,11 +24,21 @@ async function waitForHealth() {
 }
 
 function runCli(args, env = {}) {
-  return execFileSync('node', ['cli.js', ...args], {
-    cwd: process.cwd(),
-    env: { ...process.env, ...env },
-    encoding: 'utf8'
-  });
+  try {
+    const output = execFileSync('node', ['cli.js', ...args], {
+      cwd: process.cwd(),
+      env: { ...process.env, ...env },
+      encoding: 'utf8'
+    });
+    return { status: 0, output };
+  } catch (error) {
+    const stdout = typeof error?.stdout === 'string' ? error.stdout : '';
+    const stderr = typeof error?.stderr === 'string' ? error.stderr : '';
+    return {
+      status: Number.isInteger(error?.status) ? error.status : 1,
+      output: `${stdout}${stderr}`
+    };
+  }
 }
 
 async function main() {
@@ -53,14 +63,16 @@ async function main() {
 
     // 2) setup flow behavior without API key
     const setupNoKey = runCli(['setup'], { AGENT_WALLET_API: API, AGENT_WALLET_API_KEY: '' });
-    assert(setupNoKey.includes('Checking server at'), 'setup should check server');
-    assert(setupNoKey.includes('Auth required'), 'setup without key should indicate auth required');
+    assert(setupNoKey.status === 0, `setup without key should exit 0, got ${setupNoKey.status}`);
+    assert(setupNoKey.output.includes('Checking server at'), 'setup should check server');
+    assert(setupNoKey.output.includes('Auth required'), 'setup without key should indicate auth required');
     console.log('✅ setup without API key validated');
 
     // 3) protected route error wording
     const listNoKey = runCli(['list'], { AGENT_WALLET_API: API, AGENT_WALLET_API_KEY: '' });
-    assert(listNoKey.includes('Missing API key.'), 'list without key should show missing key wording');
-    assert(listNoKey.includes('node cli.js setup --init'), 'missing key wording should suggest setup command');
+    assert(listNoKey.status !== 0, 'list without key should exit non-zero');
+    assert(listNoKey.output.includes('Missing API key.'), 'list without key should show missing key wording');
+    assert(listNoKey.output.includes('node cli.js setup --init'), 'missing key wording should suggest setup command');
     console.log('✅ protected route error wording validated');
 
     // 4) setup flow behavior with API key
@@ -68,7 +80,8 @@ async function main() {
     assert(typeof adminKey === 'string' && adminKey.startsWith('sk_'), 'bootstrap admin key missing in api-keys.json');
 
     const setupWithKey = runCli(['setup'], { AGENT_WALLET_API: API, AGENT_WALLET_API_KEY: adminKey });
-    assert(setupWithKey.includes('Auth check passed'), 'setup with key should pass auth check');
+    assert(setupWithKey.status === 0, `setup with key should exit 0, got ${setupWithKey.status}`);
+    assert(setupWithKey.output.includes('Auth check passed'), 'setup with key should pass auth check');
     console.log('✅ setup with API key validated');
 
     // 5) setup --init creates scoped key + env template
@@ -77,8 +90,9 @@ async function main() {
       AGENT_WALLET_ADMIN_KEY: adminKey,
       AGENT_WALLET_API_KEY: ''
     });
-    assert(setupInit.includes('Created scoped API key'), 'setup --init should create scoped key');
-    assert(setupInit.includes('.env.local'), 'setup --init should mention .env.local');
+    assert(setupInit.status === 0, `setup --init should exit 0, got ${setupInit.status}`);
+    assert(setupInit.output.includes('Created scoped API key'), 'setup --init should create scoped key');
+    assert(setupInit.output.includes('.env.local'), 'setup --init should mention .env.local');
     console.log('✅ setup --init validated');
 
     console.log('\n✅ onboarding smoke test passed');

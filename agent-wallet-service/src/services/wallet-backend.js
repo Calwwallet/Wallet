@@ -10,6 +10,8 @@
 
 import * as viemWallet from './viem-wallet.js';
 import * as agentkitWallet from './agentkit.js';
+import { getCachedBalance, setCachedBalance, invalidateBalanceCache, getCachedChainConfig, setCachedChainConfig } from './redis.js';
+import { logger, walletLogger } from './logger.js';
 
 const BACKEND = (process.env.WALLET_BACKEND || 'viem').toLowerCase();
 
@@ -19,6 +21,11 @@ function useAgentKit() {
 
 function agentKitConfigured() {
   return Boolean(process.env.CDP_API_KEY_NAME && process.env.CDP_API_KEY_PRIVATE_KEY);
+}
+
+function shouldUseAgentKit(options = {}) {
+  if (options?.rpcMode === 'byo') return false;
+  return useAgentKit() && agentKitConfigured();
 }
 
 export function getWalletBackendInfo() {
@@ -33,7 +40,7 @@ export function getSupportedChains() {
 }
 
 export async function createWallet(options) {
-  if (useAgentKit() && agentKitConfigured()) {
+  if (shouldUseAgentKit(options)) {
     try {
       return await agentkitWallet.createWallet(options);
     } catch (error) {
@@ -48,37 +55,71 @@ export async function importWallet(options) {
 }
 
 export async function getBalance(address, chain, options = {}) {
-  if (useAgentKit() && agentKitConfigured()) {
-    try {
-      return await agentkitWallet.getBalance(address, chain);
-    } catch (error) {
-      console.warn('AgentKit getBalance failed, falling back to viem:', error.message);
-    }
+  const tenantId = options.tenantId || 'default';
+  
+  // Try cache first
+  const cached = await getCachedBalance(address, chain);
+  if (cached) {
+    logger.debug({ address, chain, tenantId }, 'Balance cache hit');
+    return cached;
   }
-  return viemWallet.getBalance(address, chain, options);
+  
+  logger.debug({ address, chain, tenantId }, 'Balance cache miss, fetching from chain');
+  
+  let balance;
+  if (shouldUseAgentKit(options)) {
+    try {
+      balance = await agentkitWallet.getBalance(address, chain);
+    } catch (error) {
+      logger.warn({ error: error.message }, 'AgentKit getBalance failed, falling back to viem');
+      balance = await viemWallet.getBalance(address, chain, options);
+    }
+  } else {
+    balance = await viemWallet.getBalance(address, chain, options);
+  }
+  
+  // Cache the result
+  if (balance) {
+    await setCachedBalance(address, chain, balance);
+  }
+  
+  return balance;
 }
 
 export async function signTransaction(params) {
-  if (useAgentKit() && agentKitConfigured()) {
+  const { from, chain } = params;
+  
+  let tx;
+  if (shouldUseAgentKit(params)) {
     try {
-      return await agentkitWallet.signTransaction(params);
+      tx = await agentkitWallet.signTransaction(params);
     } catch (error) {
-      console.warn('AgentKit signTransaction failed, falling back to viem:', error.message);
+      logger.warn({ error: error.message }, 'AgentKit signTransaction failed, falling back to viem');
+      tx = await viemWallet.signTransaction(params);
     }
+  } else {
+    tx = await viemWallet.signTransaction(params);
   }
-  return viemWallet.signTransaction(params);
+  
+  // Invalidate balance cache after transaction
+  if (tx && from) {
+    walletLogger.info({ from, chain, txHash: tx.hash }, 'Transaction sent, invalidating balance cache');
+    await invalidateBalanceCache(from, chain);
+  }
+  
+  return tx;
 }
 
 export async function sweepWallet(options) {
   return viemWallet.sweepWallet(options);
 }
 
-export async function getTransactionReceipt(hash, chainName) {
-  return viemWallet.getTransactionReceipt(hash, chainName);
+export async function getTransactionReceipt(hash, chainName, options = {}) {
+  return viemWallet.getTransactionReceipt(hash, chainName, options);
 }
 
-export async function getMultiChainBalance(address) {
-  return viemWallet.getMultiChainBalance(address);
+export async function getMultiChainBalance(address, options = {}) {
+  return viemWallet.getMultiChainBalance(address, options);
 }
 
 export async function estimateGas(params) {
@@ -97,3 +138,6 @@ export async function getWalletByAddress(address, options = {}) {
   return viemWallet.getWalletByAddress(address, options);
 }
 
+export async function transferErc20(options) {
+  return viemWallet.transferErc20(options);
+}

@@ -1,49 +1,101 @@
 /**
  * API Key Authentication Middleware
- * With rate limiting (100 req/min per key)
+ * With weighted, tier-aware rate limiting.
  */
 
-import { readFileSync, writeFileSync, existsSync } from 'fs';
-import { join } from 'path';
-import { randomBytes } from 'crypto';
-
-const API_KEYS_FILE = join(process.cwd(), 'api-keys.json');
+import { createHmac, randomBytes, randomUUID } from 'crypto';
+import { loadApiKeysRaw, saveApiKeys } from '../repositories/api-key-repository.js';
+import { getRedis } from '../services/redis.js';
+import { getDb } from '../services/db.js';
 const ONBOARDING_PATH = '/onboarding';
-const ALLOW_QUERY_API_KEY = process.env.ALLOW_QUERY_API_KEY === 'true';
 
-// Rate limiting config
-const RATE_LIMIT_WINDOW_MS = 60 * 1000; // 1 minute
-const RATE_LIMIT_MAX_REQUESTS = 100;
+const USE_DB_AUTH = process.env.AUTH_BACKEND === 'db' || process.env.STORAGE_BACKEND === 'db';
+const DEFAULT_TENANT_ID = process.env.DEFAULT_TENANT_ID || 'tenant_default';
+const DEFAULT_TENANT_NAME = process.env.DEFAULT_TENANT_NAME || 'Default tenant';
+
+// Cache for development secret (generated once per process startup)
+let devHashSecret = null;
+
+function getApiKeyHashSecret() {
+  const secret = process.env.API_KEY_HASH_SECRET;
+  if (secret) return secret;
+  
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error('FATAL: API_KEY_HASH_SECRET is required in production for DB-backed API keys.');
+  }
+  
+  // Use random secret per startup for development (not hardcoded)
+  if (!devHashSecret) {
+    devHashSecret = randomBytes(32).toString('hex');
+    console.warn('⚠️  Using randomly generated dev API key hash secret. Set API_KEY_HASH_SECRET for consistent hashing.');
+  }
+  return devHashSecret;
+}
+
+function hashApiKey(rawKey) {
+  return createHmac('sha256', getApiKeyHashSecret()).update(String(rawKey)).digest('hex');
+}
+
+function getPositiveIntEnv(name, fallback) {
+  const value = Number.parseInt(process.env[name] || '', 10);
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+const RATE_LIMIT_WINDOW_MS = getPositiveIntEnv('RATE_LIMIT_WINDOW_MS', 60 * 1000);
+const RATE_LIMIT_DEFAULT_TIER = process.env.RATE_LIMIT_DEFAULT_TIER || 'free';
+const RATE_LIMIT_MAX_POINTS_BY_TIER = {
+  free: getPositiveIntEnv('RATE_LIMIT_MAX_POINTS_FREE', 100),
+  pro: getPositiveIntEnv('RATE_LIMIT_MAX_POINTS_PRO', 300),
+  enterprise: getPositiveIntEnv('RATE_LIMIT_MAX_POINTS_ENTERPRISE', 1000)
+};
+const RATE_LIMIT_COST_READ = getPositiveIntEnv('RATE_LIMIT_COST_READ', 1);
+const RATE_LIMIT_COST_WRITE = getPositiveIntEnv('RATE_LIMIT_COST_WRITE', 2);
+const RATE_LIMIT_COST_EXPENSIVE = getPositiveIntEnv('RATE_LIMIT_COST_EXPENSIVE', 10);
+
+const EXPENSIVE_ROUTE_RULES = [
+  { method: 'POST', pattern: /^\/wallet\/[^/]+\/(send|sweep)$/ },
+  { method: 'POST', pattern: /^\/defi\/(swap|stake|unstake|supply|borrow|repay|withdraw|collateral|crosschain)$/ },
+  { method: 'POST', pattern: /^\/multisig\/[^/]+\/(submit|submit-batch|execute|confirm|cancel)$/ },
+  { method: 'GET', pattern: /^\/wallet\/[^/]+\/balance\/all$/ }
+];
 
 // In-memory rate limit store (resets on restart)
 const rateLimitStore = new Map();
 
-// Clean up stale rate limits every minute
+const USE_REDIS_RATE_LIMIT = Boolean(process.env.REDIS_URL);
+let redisClient = null;
+if (USE_REDIS_RATE_LIMIT) {
+  try {
+    redisClient = getRedis();
+  } catch (err) {
+    console.warn('Redis not configured correctly, falling back to in-memory rate limiting:', err.message);
+    redisClient = null;
+  }
+}
+
+// Clean up stale in-memory rate limits every window
 setInterval(() => {
-  const windowStart = Date.now() - RATE_LIMIT_WINDOW_MS;
-  for (const [keyId, requests] of rateLimitStore.entries()) {
-    const recent = requests.filter(time => time > windowStart);
-    if (recent.length === 0) {
+  const now = Date.now();
+  for (const [keyId, state] of rateLimitStore.entries()) {
+    if (now - state.windowStart >= RATE_LIMIT_WINDOW_MS) {
       rateLimitStore.delete(keyId);
-    } else {
-      rateLimitStore.set(keyId, recent);
     }
   }
 }, RATE_LIMIT_WINDOW_MS).unref();
 
-// Load or create API keys
-function loadApiKeys() {
-  if (existsSync(API_KEYS_FILE)) {
-    return JSON.parse(readFileSync(API_KEYS_FILE, 'utf-8'));
-  }
-  // Create default admin key
+// JSON auth backend state
+function loadApiKeysJson() {
+  const existing = loadApiKeysRaw();
+  if (existing.length > 0) return existing;
+
   const defaultKey = {
     key: `sk_live_${randomBytes(32).toString('hex')}`,
     name: 'admin',
     createdAt: new Date().toISOString(),
     permissions: ['read', 'write', 'admin']
   };
-  writeFileSync(API_KEYS_FILE, JSON.stringify([defaultKey], null, 2));
+  saveApiKeys([defaultKey]);
+
   const showSecret = process.env.SHOW_BOOTSTRAP_SECRET === 'true';
   const preview = `${defaultKey.key.slice(0, 12)}...`;
   if (showSecret) {
@@ -51,55 +103,236 @@ function loadApiKeys() {
   } else {
     console.log(`🔑 Generated admin API key: ${preview} (set SHOW_BOOTSTRAP_SECRET=true to print full key)`);
   }
+
   return [defaultKey];
 }
 
-function saveApiKeys(keys) {
-  writeFileSync(API_KEYS_FILE, JSON.stringify(keys, null, 2));
+let apiKeys = USE_DB_AUTH ? [] : loadApiKeysJson();
+
+let dbInitPromise = null;
+async function initDbAuth() {
+  if (!USE_DB_AUTH) return;
+  if (dbInitPromise) return dbInitPromise;
+
+  dbInitPromise = (async () => {
+    const db = getDb();
+
+    // Ensure default tenant exists
+    await db.query(
+      `insert into tenants(id, name) values ($1, $2)
+       on conflict (id) do update set name = excluded.name`,
+      [DEFAULT_TENANT_ID, DEFAULT_TENANT_NAME]
+    );
+
+    // Ensure at least one admin key exists for default tenant
+    const existing = await db.query(
+      `select id from api_keys where tenant_id = $1 and revoked_at is null limit 1`,
+      [DEFAULT_TENANT_ID]
+    );
+
+    if (existing.rowCount === 0) {
+      const rawKey = `sk_live_${randomBytes(32).toString('hex')}`;
+      const keyHash = hashApiKey(rawKey);
+      const keyPrefix = rawKey.slice(0, 12);
+      const id = `ak_${randomUUID()}`;
+
+      await db.query(
+        `insert into api_keys(id, tenant_id, key_hash, key_prefix, name, permissions)
+         values ($1, $2, $3, $4, $5, $6)`,
+        [id, DEFAULT_TENANT_ID, keyHash, keyPrefix, 'admin', JSON.stringify(['read', 'write', 'admin'])]
+      );
+
+      const showSecret = process.env.SHOW_BOOTSTRAP_SECRET === 'true';
+      const preview = `${rawKey.slice(0, 12)}...`;
+      if (showSecret) {
+        console.log(`🔑 Generated admin API key: ${rawKey}`);
+      } else {
+        console.log(`🔑 Generated admin API key: ${preview} (set SHOW_BOOTSTRAP_SECRET=true to print full key)`);
+      }
+    }
+  })();
+
+  return dbInitPromise;
 }
 
-let apiKeys = loadApiKeys();
+const REDIS_RATE_LIMIT_LUA = `
+local key = KEYS[1]
+local weight = tonumber(ARGV[1])
+local ttl = tonumber(ARGV[2])
+local current = tonumber(redis.call('GET', key) or '0')
 
-/**
- * Check rate limit for API key
- */
-function checkRateLimit(keyId) {
-  const now = Date.now();
-  const windowStart = now - RATE_LIMIT_WINDOW_MS;
+if current == 0 then
+  redis.call('SET', key, weight, 'PX', ttl, 'NX')
+  local pttl = redis.call('PTTL', key)
+  return { weight, pttl }
+end
 
-  // Get or create request history
-  if (!rateLimitStore.has(keyId)) {
-    rateLimitStore.set(keyId, []);
+local updated = redis.call('INCRBY', key, weight)
+local pttl = redis.call('PTTL', key)
+
+if pttl < 0 then
+  redis.call('PEXPIRE', key, ttl)
+  pttl = ttl
+end
+
+return { updated, pttl }
+`;
+
+function resolveRateLimitTier(permissions = []) {
+  const normalized = Array.isArray(permissions) ? permissions : [];
+  for (const permission of normalized) {
+    if (typeof permission === 'string' && permission.startsWith('tier:')) {
+      const tier = permission.slice('tier:'.length).trim().toLowerCase();
+      if (RATE_LIMIT_MAX_POINTS_BY_TIER[tier]) return tier;
+    }
+  }
+  if (normalized.includes('admin')) return 'enterprise';
+  if (normalized.includes('write')) return 'pro';
+  return RATE_LIMIT_MAX_POINTS_BY_TIER[RATE_LIMIT_DEFAULT_TIER] ? RATE_LIMIT_DEFAULT_TIER : 'free';
+}
+
+function resolveRpcMode(permissions = [], tier = 'free') {
+  const normalized = Array.isArray(permissions) ? permissions : [];
+  for (const permission of normalized) {
+    if (typeof permission !== 'string') continue;
+    if (!permission.startsWith('rpc:')) continue;
+    const mode = permission.slice('rpc:'.length).trim().toLowerCase();
+    if (mode === 'byo' || mode === 'managed') {
+      return mode;
+    }
   }
 
-  const requests = rateLimitStore.get(keyId);
+  if (tier === 'free') return 'byo';
+  return 'managed';
+}
 
-  // Remove old requests outside window
-  const recentRequests = requests.filter(time => time > windowStart);
+function resolveRateLimitLimit(tier) {
+  return RATE_LIMIT_MAX_POINTS_BY_TIER[tier] || RATE_LIMIT_MAX_POINTS_BY_TIER.free;
+}
 
-  if (recentRequests.length >= RATE_LIMIT_MAX_REQUESTS) {
+function getNormalizedRequestPath(req) {
+  const original = typeof req.originalUrl === 'string'
+    ? req.originalUrl
+    : `${req.baseUrl || ''}${req.path || ''}`;
+  return (original.split('?')[0] || '/').toLowerCase();
+}
+
+function getRequestCost(req) {
+  const path = getNormalizedRequestPath(req);
+  const method = (req.method || 'GET').toUpperCase();
+  for (const rule of EXPENSIVE_ROUTE_RULES) {
+    if (rule.method === method && rule.pattern.test(path)) {
+      return RATE_LIMIT_COST_EXPENSIVE;
+    }
+  }
+  return ['GET', 'HEAD', 'OPTIONS'].includes(method)
+    ? RATE_LIMIT_COST_READ
+    : RATE_LIMIT_COST_WRITE;
+}
+
+function buildRateLimitKey({ keyId, tier, tenantId }) {
+  // Include tenantId to ensure rate limits are per-tenant, not shared across tenants
+  const tenantPart = tenantId || 'default';
+  return `rl:v2:${tier}:${tenantPart}:${keyId}`;
+}
+
+function checkRateLimitInMemory(keyId, { limit, cost }) {
+  const now = Date.now();
+  let state = rateLimitStore.get(keyId);
+
+  if (!state || now - state.windowStart >= RATE_LIMIT_WINDOW_MS) {
+    state = { windowStart: now, count: 0 };
+  }
+
+  const nextCount = state.count + cost;
+  const resetAt = state.windowStart + RATE_LIMIT_WINDOW_MS;
+
+  if (nextCount > limit) {
+    rateLimitStore.set(keyId, state);
     return {
       allowed: false,
+      limit,
+      cost,
       remaining: 0,
-      resetAt: recentRequests[0] + RATE_LIMIT_WINDOW_MS
+      resetAt
     };
   }
 
-  // Add current request
-  recentRequests.push(now);
-  rateLimitStore.set(keyId, recentRequests);
-
+  state.count = nextCount;
+  rateLimitStore.set(keyId, state);
   return {
     allowed: true,
-    remaining: RATE_LIMIT_MAX_REQUESTS - recentRequests.length,
-    resetAt: now + RATE_LIMIT_WINDOW_MS
+    limit,
+    cost,
+    remaining: Math.max(limit - state.count, 0),
+    resetAt
   };
+}
+
+async function checkRateLimitRedis(keyId, { limit, cost }) {
+  if (!redisClient) {
+    return checkRateLimitInMemory(keyId, { limit, cost });
+  }
+  const now = Date.now();
+  const key = keyId;
+  const result = await redisClient.eval(
+    REDIS_RATE_LIMIT_LUA,
+    1,
+    key,
+    String(cost),
+    String(RATE_LIMIT_WINDOW_MS)
+  );
+
+  const count = Number(Array.isArray(result) ? result[0] : 0);
+  const ttl = Math.max(Number(Array.isArray(result) ? result[1] : RATE_LIMIT_WINDOW_MS), 0);
+  return {
+    allowed: count <= limit,
+    limit,
+    cost,
+    remaining: Math.max(limit - count, 0),
+    resetAt: now + ttl
+  };
+}
+
+async function checkRateLimit(keyId, { limit, cost }) {
+  if (USE_REDIS_RATE_LIMIT && redisClient) {
+    try {
+      return await checkRateLimitRedis(keyId, { limit, cost });
+    } catch (err) {
+      console.warn('Redis rate limit check failed, falling back to memory:', err.message);
+      return checkRateLimitInMemory(keyId, { limit, cost });
+    }
+  }
+  return checkRateLimitInMemory(keyId, { limit, cost });
 }
 
 /**
  * Generate a new API key
  */
-export function createApiKey(name, permissions = ['read', 'write']) {
+export async function createApiKey(name, permissions = ['read', 'write'], { tenantId } = {}) {
+  if (USE_DB_AUTH) {
+    await initDbAuth();
+    const db = getDb();
+    const rawKey = `sk_${randomBytes(32).toString('hex')}`;
+    const keyHash = hashApiKey(rawKey);
+    const keyPrefix = rawKey.slice(0, 12);
+    const id = `ak_${randomUUID()}`;
+    const resolvedTenant = tenantId || DEFAULT_TENANT_ID;
+
+    await db.query(
+      `insert into api_keys(id, tenant_id, key_hash, key_prefix, name, permissions)
+       values ($1, $2, $3, $4, $5, $6)`,
+      [id, resolvedTenant, keyHash, keyPrefix, name, JSON.stringify(permissions)]
+    );
+
+    return {
+      key: rawKey,
+      name,
+      createdAt: new Date().toISOString(),
+      permissions
+    };
+  }
+
   const newKey = {
     key: `sk_${randomBytes(32).toString('hex')}`,
     name,
@@ -114,7 +347,27 @@ export function createApiKey(name, permissions = ['read', 'write']) {
 /**
  * List all API keys (masked)
  */
-export function listApiKeys() {
+export async function listApiKeys({ tenantId } = {}) {
+  if (USE_DB_AUTH) {
+    await initDbAuth();
+    const db = getDb();
+    const resolvedTenant = tenantId || DEFAULT_TENANT_ID;
+    const res = await db.query(
+      `select key_prefix, name, created_at, permissions
+       from api_keys
+       where tenant_id = $1 and revoked_at is null
+       order by created_at desc`,
+      [resolvedTenant]
+    );
+
+    return res.rows.map((k) => ({
+      key: `${k.key_prefix}...`,
+      name: k.name,
+      createdAt: k.created_at,
+      permissions: k.permissions
+    }));
+  }
+
   return apiKeys.map(k => ({
     key: k.key.slice(0, 12) + '...',
     name: k.name,
@@ -126,7 +379,26 @@ export function listApiKeys() {
 /**
  * Onboarding state helper
  */
-export function getOnboardingState() {
+export async function getOnboardingState() {
+  if (USE_DB_AUTH) {
+    await initDbAuth();
+    const db = getDb();
+    const res = await db.query(
+      `select count(*)::int as count, min(key_prefix) as first_prefix
+       from api_keys where tenant_id = $1 and revoked_at is null`,
+      [DEFAULT_TENANT_ID]
+    );
+    const count = res.rows?.[0]?.count || 0;
+    const first = res.rows?.[0]?.first_prefix || null;
+    return {
+      hasApiKeys: count > 0,
+      apiKeyCount: count,
+      firstKeyPrefix: first,
+      docsPath: '/README.md#quick-start',
+      onboardingPath: ONBOARDING_PATH
+    };
+  }
+
   return {
     hasApiKeys: apiKeys.length > 0,
     apiKeyCount: apiKeys.length,
@@ -139,7 +411,20 @@ export function getOnboardingState() {
 /**
  * Revoke an API key
  */
-export function revokeApiKey(keyPrefix) {
+export async function revokeApiKey(keyPrefix, { tenantId } = {}) {
+  if (USE_DB_AUTH) {
+    await initDbAuth();
+    const db = getDb();
+    const resolvedTenant = tenantId || DEFAULT_TENANT_ID;
+    const res = await db.query(
+      `update api_keys
+       set revoked_at = now()
+       where tenant_id = $1 and key_prefix = $2 and revoked_at is null`,
+      [resolvedTenant, keyPrefix]
+    );
+    return res.rowCount > 0;
+  }
+
   const index = apiKeys.findIndex(k => k.key.startsWith(keyPrefix));
   if (index === -1) return false;
   apiKeys.splice(index, 1);
@@ -150,31 +435,116 @@ export function revokeApiKey(keyPrefix) {
 /**
  * Validate API key
  */
-function validateApiKey(providedKey) {
+function validateApiKeyJson(providedKey) {
   const key = apiKeys.find(k => k.key === providedKey);
   if (!key) return null;
   return key;
+}
+
+async function validateApiKeyDb(providedKey) {
+  await initDbAuth();
+  const db = getDb();
+  const keyHash = hashApiKey(providedKey);
+  const res = await db.query(
+    `select ak.id, ak.tenant_id, ak.name, ak.permissions, t.name as tenant_name
+     from api_keys ak
+     join tenants t on t.id = ak.tenant_id
+     where ak.key_hash = $1 and ak.revoked_at is null
+     limit 1`,
+    [keyHash]
+  );
+
+  if (res.rowCount === 0) return null;
+
+  const row = res.rows[0];
+  return {
+    id: row.id,
+    name: row.name,
+    permissions: row.permissions,
+    tenant: { id: row.tenant_id, name: row.tenant_name }
+  };
+}
+
+function buildRateLimitSubject({ isDbAuth, key, req }) {
+  if (isDbAuth && req.tenant?.id && req.apiKey?.id) {
+    return `${req.tenant.id}:${req.apiKey.id}`;
+  }
+  if (isDbAuth) {
+    return `db_fallback:${key?.id || 'unknown'}`;
+  }
+  return key?.key || 'anonymous';
+}
+
+function hasPermission(requiredPermission, permissions = []) {
+  if (requiredPermission === 'read') return true;
+  if (requiredPermission === 'write') {
+    return permissions.includes('write') || permissions.includes('admin');
+  }
+  if (requiredPermission === 'admin') {
+    return permissions.includes('admin');
+  }
+  return false;
+}
+
+function setRateLimitHeaders(res, rateLimit) {
+  const resetInSeconds = Math.max(0, Math.ceil((rateLimit.resetAt - Date.now()) / 1000));
+  const limit = String(rateLimit.limit);
+  const remaining = String(Math.max(rateLimit.remaining, 0));
+  const reset = String(resetInSeconds);
+
+  // RFC-style headers
+  res.set('RateLimit-Limit', limit);
+  res.set('RateLimit-Remaining', remaining);
+  res.set('RateLimit-Reset', reset);
+  res.set('RateLimit-Policy', `${rateLimit.limit};w=${Math.ceil(RATE_LIMIT_WINDOW_MS / 1000)}`);
+
+  // Backward-compatible headers
+  res.set('X-RateLimit-Limit', limit);
+  res.set('X-RateLimit-Remaining', remaining);
+  res.set('X-RateLimit-Reset', String(rateLimit.resetAt));
+  res.set('X-RateLimit-Cost', String(rateLimit.cost));
+
+  return resetInSeconds;
+}
+
+function setPlanHeaders(res, { tier, rpcMode }) {
+  res.set('X-Plan-Tier', tier);
+  res.set('X-RPC-Mode', rpcMode);
 }
 
 /**
  * Auth middleware - check for valid API key and rate limit
  */
 export function requireAuth(requiredPermission = 'read') {
-  return (req, res, next) => {
+  return async (req, res, next) => {
     // Skip auth for health check
     if (req.path === '/health') {
       return next();
     }
 
-    // Get API key from header (query fallback is opt-in for local dev only)
-    const apiKey = req.headers['x-api-key'] || (ALLOW_QUERY_API_KEY ? req.query.apiKey : undefined);
+    // Avoid duplicate auth/rate-limit checks when requireAuth is stacked
+    if (req.authContext?.authenticated) {
+      if (!hasPermission(requiredPermission, req.authContext.permissions)) {
+        return res.status(403).json({
+          error: requiredPermission === 'admin'
+            ? 'Admin permission required'
+            : 'Write permission required',
+          error_code: requiredPermission === 'admin'
+            ? 'ADMIN_PERMISSION_REQUIRED'
+            : 'WRITE_PERMISSION_REQUIRED'
+        });
+      }
+      return next();
+    }
+
+    // Get API key from header only
+    const apiKey = req.headers['x-api-key'];
 
     if (!apiKey) {
       return res.status(401).json({
         error: 'API key required',
-        hint: ALLOW_QUERY_API_KEY
-          ? 'Include X-API-Key header or ?apiKey= query param'
-          : 'Include X-API-Key header',
+        error_code: 'API_KEY_REQUIRED',
+        hint: 'Include X-API-Key header',
         setup: {
           onboarding: ONBOARDING_PATH,
           docs: '/README.md#quick-start',
@@ -187,50 +557,132 @@ export function requireAuth(requiredPermission = 'read') {
       });
     }
 
-    const key = validateApiKey(apiKey);
+    const key = USE_DB_AUTH
+      ? await validateApiKeyDb(apiKey)
+      : validateApiKeyJson(apiKey);
+
     if (!key) {
-      return res.status(403).json({ error: 'Invalid API key' });
+      return res.status(403).json({
+        error: 'Invalid API key',
+        error_code: 'API_KEY_INVALID',
+        docs_url: '/README.md#api-keys'
+      });
     }
 
-    // Check rate limit
-    const rateLimit = checkRateLimit(key.key);
-    res.set('X-RateLimit-Limit', RATE_LIMIT_MAX_REQUESTS);
-    res.set('X-RateLimit-Remaining', rateLimit.remaining);
-    res.set('X-RateLimit-Reset', rateLimit.resetAt);
+    if (USE_DB_AUTH) {
+      req.tenant = key.tenant;
+      req.apiKey = { id: key.id, name: key.name, permissions: key.permissions };
+    } else {
+      req.apiKey = key;
+    }
+
+    const permissions = USE_DB_AUTH ? req.apiKey.permissions : key.permissions;
+    const tier = resolveRateLimitTier(permissions);
+    const rpcMode = resolveRpcMode(permissions, tier);
+    const limit = resolveRateLimitLimit(tier);
+    const cost = getRequestCost(req);
+    const subject = buildRateLimitSubject({ isDbAuth: USE_DB_AUTH, key, req });
+    const tenantId = USE_DB_AUTH && key.tenant ? key.tenant.id : null;
+    const rateKey = buildRateLimitKey({ keyId: subject, tier, tenantId });
+    const rateLimit = await checkRateLimit(rateKey, { limit, cost });
+    const retryAfterSeconds = setRateLimitHeaders(res, rateLimit);
+    setPlanHeaders(res, { tier, rpcMode });
 
     if (!rateLimit.allowed) {
+      res.set('Retry-After', String(retryAfterSeconds));
       return res.status(429).json({
         error: 'Rate limit exceeded',
-        limit: RATE_LIMIT_MAX_REQUESTS,
+        error_code: 'RATE_LIMIT_EXCEEDED',
+        tier,
+        rpcMode,
+        limit,
+        cost,
+        remaining: rateLimit.remaining,
+        retryAfter: `${retryAfterSeconds} seconds`,
         resetAt: new Date(rateLimit.resetAt).toISOString()
       });
     }
 
-    // Check permission
-    if (requiredPermission === 'write' && !key.permissions.includes('write') && !key.permissions.includes('admin')) {
-      return res.status(403).json({ error: 'Write permission required' });
+    if (!hasPermission(requiredPermission, permissions)) {
+      return res.status(403).json({
+        error: requiredPermission === 'admin'
+          ? 'Admin permission required'
+          : 'Write permission required',
+        error_code: requiredPermission === 'admin'
+          ? 'ADMIN_PERMISSION_REQUIRED'
+          : 'WRITE_PERMISSION_REQUIRED'
+      });
     }
 
-    if (requiredPermission === 'admin' && !key.permissions.includes('admin')) {
-      return res.status(403).json({ error: 'Admin permission required' });
-    }
+    req.authContext = {
+      authenticated: true,
+      permissions,
+      tier,
+      rpcMode,
+      subject
+    };
 
-    // Attach key info to request
-    req.apiKey = key;
     next();
   };
 }
 
 /**
  * Optional auth - doesn't block but tracks usage
+ *
+ * Validates API key and applies rate accounting when present, but never blocks
+ * the request. Use requireAuth() when auth must be enforced.
  */
 export function optionalAuth(req, res, next) {
-  const apiKey = req.headers['x-api-key'] || (ALLOW_QUERY_API_KEY ? req.query.apiKey : undefined);
-  if (apiKey) {
-    const key = validateApiKey(apiKey);
-    if (key) {
-      req.apiKey = key;
+  (async () => {
+    try {
+      if (req.authContext?.authenticated) {
+        return;
+      }
+
+      const apiKey = req.headers['x-api-key'];
+      if (!apiKey) return;
+
+      const key = USE_DB_AUTH
+        ? await validateApiKeyDb(apiKey)
+        : validateApiKeyJson(apiKey);
+
+      if (!key) return;
+
+      if (USE_DB_AUTH) {
+        req.tenant = key.tenant;
+        req.apiKey = { id: key.id, name: key.name, permissions: key.permissions };
+      } else {
+        req.apiKey = key;
+      }
+
+      const permissions = USE_DB_AUTH ? req.apiKey.permissions : key.permissions;
+      const tier = resolveRateLimitTier(permissions);
+      const rpcMode = resolveRpcMode(permissions, tier);
+      const limit = resolveRateLimitLimit(tier);
+      const cost = getRequestCost(req);
+      const subject = buildRateLimitSubject({ isDbAuth: USE_DB_AUTH, key, req });
+      const tenantId = USE_DB_AUTH && key.tenant ? key.tenant.id : null;
+      const rateKey = buildRateLimitKey({ keyId: subject, tier, tenantId });
+      const rateLimit = await checkRateLimit(rateKey, { limit, cost });
+      const retryAfterSeconds = setRateLimitHeaders(res, rateLimit);
+      setPlanHeaders(res, { tier, rpcMode });
+
+      req.authContext = {
+        authenticated: true,
+        permissions,
+        tier,
+        rpcMode,
+        subject
+      };
+
+      if (!rateLimit.allowed) {
+        res.set('Retry-After', String(retryAfterSeconds));
+        console.warn('Optional auth rate limit exceeded for key:', key.name || subject);
+      }
+    } catch (err) {
+      console.warn('optionalAuth validation error:', err.message);
+    } finally {
+      next();
     }
-  }
-  next();
+  })();
 }

@@ -1,5 +1,7 @@
 /**
  * Simple Rate Limiting Middleware
+ * Legacy middleware kept for compatibility.
+ * Active auth + rate limiting is implemented in middleware/auth.js.
  */
 
 const requests = new Map();
