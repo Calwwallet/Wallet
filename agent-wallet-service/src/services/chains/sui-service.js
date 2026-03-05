@@ -6,8 +6,11 @@
  */
 
 import 'dotenv/config';
-import { Ed25519Keypair, JsonRpcProvider, RawSigner, fromB64, toB64 } from '@mysten/sui';
-import { randomBytes } from 'crypto';
+import { SuiJsonRpcClient } from '@mysten/sui/jsonRpc';
+import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
+import { decodeSuiPrivateKey } from '@mysten/sui/cryptography';
+import { fromBase64, toBase64 } from '@mysten/sui/utils';
+import { Transaction } from '@mysten/sui/transactions';
 
 // ============================================================
 // CHAIN CONFIGURATION
@@ -109,7 +112,7 @@ async function createProvider(chainConfig) {
 
   for (const rpc of rpcs) {
     try {
-      const provider = new JsonRpcProvider(rpc);
+      const provider = new SuiJsonRpcClient({ url: rpc });
       // Test the connection
       await provider.getLatestCheckpointSequenceNumber();
       return { provider, rpc };
@@ -157,7 +160,7 @@ export async function createWallet({ agentName, chain = DEFAULT_CHAIN, tenantId 
       id: walletId,
       agentName,
       address: keypair.getPublicKey().toSuiAddress(),
-      privateKey: toB64(keypair.export().privateKey), // Base64 encoded
+      privateKey: toBase64(decodeSuiPrivateKey(keypair.getSecretKey()).secretKey), // Base64 encoded
       chain,
       createdAt: new Date().toISOString()
     };
@@ -180,10 +183,11 @@ export async function createWallet({ agentName, chain = DEFAULT_CHAIN, tenantId 
 /**
  * Get wallet from base64 private key
  */
-function getSignerFromBase64(privateKeyBase64, provider) {
-  const privateKeyBytes = fromB64(privateKeyBase64);
-  const keypair = Ed25519Keypair.fromSecretKey(privateKeyBytes.slice(1)); // Remove flag byte
-  return new RawSigner(keypair, provider);
+function getSignerFromBase64(privateKeyBase64) {
+  const privateKeyBytes = fromBase64(privateKeyBase64);
+  const normalized = privateKeyBytes.length === 33 ? privateKeyBytes.slice(1) : privateKeyBytes;
+  const keypair = Ed25519Keypair.fromSecretKey(normalized);
+  return keypair;
 }
 
 /**
@@ -234,28 +238,30 @@ export async function transfer({
   
   try {
     const { provider } = await createProvider(chainConfig);
-    const signer = getSignerFromBase64(fromPrivateKeyBase64, provider);
+    const signer = getSignerFromBase64(fromPrivateKeyBase64);
     
     // Convert amount to MIST (9 decimals)
     const amountMist = BigInt(Math.round(amount * Math.pow(10, 9)));
     
-    // Execute transfer
-    const tx = await signer.transferObject({
-      objectId: '0x0000000000000000000000000000000000000000000000000000000000000006', // SUI coin object
-      gasBudget: 1000000,
-      recipient: to
+    const tx = new Transaction();
+    const [coin] = tx.splitCoins(tx.gas, [amountMist]);
+    tx.transferObjects([coin], to);
+
+    const result = await provider.signAndExecuteTransaction({
+      signer,
+      transaction: tx,
+      options: { showEffects: true }
     });
-    
-    // Wait for execution
-    const result = await provider.waitForTransaction(tx.digest);
+
+    await provider.waitForTransaction({ digest: result.digest });
 
     return {
-      hash: tx.digest,
-      from: await signer.getAddress(),
+      hash: result.digest,
+      from: signer.toSuiAddress(),
       to,
       amount: amount.toString(),
       chain,
-      status: result.effects.status.status === 'success' ? 'confirmed' : 'failed'
+      status: result.effects?.status?.status === 'success' ? 'confirmed' : 'failed'
     };
   } catch (error) {
     console.error('Transfer failed:', error);
@@ -377,27 +383,31 @@ export async function moveCall({
   
   try {
     const { provider } = await createProvider(chainConfig);
-    const signer = getSignerFromBase64(fromPrivateKeyBase64, provider);
-    
-    const tx = await signer.moveCall({
-      package: packageId,
-      module,
-      function: funcName,
+    const signer = getSignerFromBase64(fromPrivateKeyBase64);
+
+    const tx = new Transaction();
+    tx.moveCall({
+      target: `${packageId}::${module}::${funcName}`,
       typeArguments,
-      arguments: args,
-      gasBudget: 1000000
+      arguments: args
     });
-    
-    const result = await provider.waitForTransaction(tx.digest);
+
+    const result = await provider.signAndExecuteTransaction({
+      signer,
+      transaction: tx,
+      options: { showEffects: true }
+    });
+
+    await provider.waitForTransaction({ digest: result.digest });
 
     return {
-      hash: tx.digest,
-      from: await signer.getAddress(),
+      hash: result.digest,
+      from: signer.toSuiAddress(),
       packageId,
       module,
       function: funcName,
       chain,
-      status: result.effects.status.status === 'success' ? 'confirmed' : 'failed'
+      status: result.effects?.status?.status === 'success' ? 'confirmed' : 'failed'
     };
   } catch (error) {
     console.error('Move call failed:', error);

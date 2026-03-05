@@ -532,7 +532,12 @@ router.get('/:address/balance', requireRpcUrlForByo, async (req, res) => {
     });
   } catch (error) {
     console.error('Balance check error:', error);
-    res.status(500).json({ error: error.message });
+    const rpcUnavailable = typeof error?.message === 'string' && error.message.includes('All RPCs failed');
+    const statusCode = rpcUnavailable ? 503 : 500;
+    res.status(statusCode).json({
+      error: error.message,
+      error_code: rpcUnavailable ? 'RPC_UNAVAILABLE' : 'INTERNAL_ERROR'
+    });
   }
 });
 
