@@ -1,8 +1,5 @@
-console.log('DEBUG: Starting index.js');
 import 'dotenv/config';
-console.log('DEBUG: dotenv loaded');
 import express from 'express';
-console.log('DEBUG: express loaded');
 import walletRoutes from './routes/wallet.js';
 import identityRoutes from './routes/identity.js';
 import ensRoutes from './routes/ens.js';

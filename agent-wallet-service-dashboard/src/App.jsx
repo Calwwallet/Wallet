@@ -1,14 +1,7 @@
 import React, { useEffect, useState, useCallback } from 'react';
 
 function useApiKey() {
-  const [apiKey, setApiKey] = useState(() => localStorage.getItem('agentWalletApiKey') || '');
-
-  useEffect(() => {
-    if (apiKey) {
-      localStorage.setItem('agentWalletApiKey', apiKey);
-    }
-  }, [apiKey]);
-
+  const [apiKey, setApiKey] = useState('');
   return [apiKey, setApiKey];
 }
 
@@ -267,6 +260,10 @@ export default function App() {
   const [showWalletDetail, setShowWalletDetail] = useState(false);
   const [showConfirmDelete, setShowConfirmDelete] = useState(false);
   const [showExportConfirm, setShowExportConfirm] = useState(false);
+  const [showExportResult, setShowExportResult] = useState(false);
+  const [exportedPrivateKey, setExportedPrivateKey] = useState('');
+  const [revealPrivateKey, setRevealPrivateKey] = useState(false);
+  const [keyClearCountdown, setKeyClearCountdown] = useState(0);
 
   // Form states
   const [walletName, setWalletName] = useState('');
@@ -414,8 +411,10 @@ export default function App() {
       });
       setShowExportConfirm(false);
       setShowWalletDetail(false);
-      addToast('Private key exported — check console for key', 'success');
-      console.log('Private key:', res.privateKey);
+      setExportedPrivateKey(res.privateKey || '');
+      setRevealPrivateKey(false);
+      setShowExportResult(true);
+      addToast('Private key exported — reveal and copy it now', 'success');
     } catch (e) {
       addToast(e.message, 'error');
     } finally {
@@ -500,6 +499,27 @@ export default function App() {
       return () => clearInterval(interval);
     }
   }, [apiKey]);
+
+  useEffect(() => {
+    if (!exportedPrivateKey) return;
+
+    setKeyClearCountdown(30);
+    const interval = setInterval(() => {
+      setKeyClearCountdown((seconds) => {
+        if (seconds <= 1) {
+          clearInterval(interval);
+          setExportedPrivateKey('');
+          setRevealPrivateKey(false);
+          setShowExportResult(false);
+          addToast('Exported private key cleared from screen', 'success');
+          return 0;
+        }
+        return seconds - 1;
+      });
+    }, 1000);
+
+    return () => clearInterval(interval);
+  }, [addToast, exportedPrivateKey]);
 
   // Filter transactions
   const filteredHistory = history.filter((tx) => {
@@ -834,6 +854,41 @@ export default function App() {
         confirmText="Export Key"
         danger
       />
+
+      <Modal
+        isOpen={showExportResult}
+        onClose={() => {
+          setShowExportResult(false);
+          setExportedPrivateKey('');
+          setRevealPrivateKey(false);
+        }}
+        title="Private Key Export"
+      >
+        <div className="form-group">
+          <label>Private Key (auto-clears in {keyClearCountdown}s)</label>
+          <input
+            type={revealPrivateKey ? 'text' : 'password'}
+            value={exportedPrivateKey}
+            readOnly
+          />
+        </div>
+        <div className="modal-actions">
+          <button className="btn-secondary" onClick={() => setRevealPrivateKey((show) => !show)}>
+            {revealPrivateKey ? 'Hide' : 'Reveal'}
+          </button>
+          <CopyButton text={exportedPrivateKey} label="Copy private key" />
+          <button
+            className="btn-danger"
+            onClick={() => {
+              setShowExportResult(false);
+              setExportedPrivateKey('');
+              setRevealPrivateKey(false);
+            }}
+          >
+            Clear
+          </button>
+        </div>
+      </Modal>
     </div>
   );
 }

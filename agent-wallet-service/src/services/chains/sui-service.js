@@ -6,7 +6,7 @@
  */
 
 import 'dotenv/config';
-import { Ed25519Keypair, JsonRpcProvider, RawSigner, fromB64, toB64 } from '@mysten/sui';
+import { Ed25519Keypair, JsonRpcProvider, RawSigner, fromB64, toB64 } from '@mysten/sui.js';
 import { randomBytes } from 'crypto';
 
 // ============================================================
