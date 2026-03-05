@@ -27,6 +27,12 @@ cp .env.example .env
 Edit `.env` with your settings:
 
 ```bash
+# Recommended managed RPC key for EVM chains
+ALCHEMY_API_KEY=your-alchemy-api-key
+
+# Optional Base Sepolia fallback override list
+BASE_SEPOLIA_RPCS=https://base-sepolia.g.alchemy.com/v2/<key>,https://base-sepolia-public.nodies.app
+
 # Required for production
 NODE_ENV=production
 WALLET_ENCRYPTION_KEY=your-64-char-hex-key
