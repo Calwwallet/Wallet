@@ -6,8 +6,7 @@
  */
 
 import 'dotenv/config';
-import { AptosAccount, AptosClient, HexString, BCS, TxnBuilderTypes } from 'aptos';
-import { randomBytes } from 'crypto';
+import { Account, Aptos, AptosConfig, Network, Ed25519PrivateKey } from '@aptos-labs/ts-sdk';
 
 // ============================================================
 // CHAIN CONFIGURATION
@@ -112,7 +111,10 @@ async function createClient(chainConfig) {
 
   for (const rpc of rpcs) {
     try {
-      const client = new AptosClient(rpc);
+      const client = new Aptos(new AptosConfig({
+        network: Network.CUSTOM,
+        fullnode: rpc.endsWith('/v1') ? rpc : `${rpc}/v1`
+      }));
       // Test the connection
       await client.getLedgerInfo();
       return { client, rpc };
@@ -144,8 +146,7 @@ export function getSupportedChains() {
  * Generate a random keypair (wallet)
  */
 function generateKeypair() {
-  const privateKeyBytes = randomBytes(32);
-  return new AptosAccount(privateKeyBytes);
+  return Account.generate();
 }
 
 /**
@@ -160,17 +161,17 @@ export async function createWallet({ agentName, chain = DEFAULT_CHAIN, tenantId 
     const wallet = {
       id: walletId,
       agentName,
-      address: account.address().toString(),
-      privateKey: Buffer.from(account.privateKeyHex()).toString('hex'), // Hex encoded
+      address: account.accountAddress.toString(),
+      privateKey: account.privateKey.toString().replace('ed25519-priv-', '').replace('0x', ''), // Hex encoded
       chain,
       createdAt: new Date().toISOString()
     };
 
-    console.log(`✅ Created Aptos wallet for ${agentName}: ${account.address().toString()}`);
+    console.log(`✅ Created Aptos wallet for ${agentName}: ${account.accountAddress.toString()}`);
 
     return {
       id: walletId,
-      address: account.address().toString(),
+      address: account.accountAddress.toString(),
       chain,
       chainId: chainConfig.chain.id,
       privateKeyHex: wallet.privateKey
@@ -185,7 +186,9 @@ export async function createWallet({ agentName, chain = DEFAULT_CHAIN, tenantId 
  * Get wallet from hex private key
  */
 function getAccountFromHex(privateKeyHex) {
-  return new AptosAccount(HexString.ensure(privateKeyHex).toUint8Array());
+  const normalized = privateKeyHex.startsWith('0x') ? privateKeyHex : `0x${privateKeyHex}`;
+  const privateKey = new Ed25519PrivateKey(normalized);
+  return Account.fromPrivateKey({ privateKey });
 }
 
 /**
@@ -197,7 +200,7 @@ export async function getBalance(address, chain = DEFAULT_CHAIN) {
   try {
     const { client } = await createClient(chainConfig);
     
-    const resources = await client.getAccountResources(address);
+    const resources = await client.getAccountResources({ accountAddress: address });
     const aptCoinResource = resources.find(r => r.type === `0x1::coin::CoinStore<${APT_COIN_TYPE}>`);
     
     let balance = '0';
@@ -242,29 +245,28 @@ export async function transfer({
     // Convert amount to octas (8 decimals)
     const amountOctas = Math.round(amount * Math.pow(10, 8));
     
-    // Build transaction payload
-    const payload = {
-      type: 'entry_function_payload',
-      function: '0x1::coin::transfer',
-      type_arguments: [APT_COIN_TYPE],
-      arguments: [to, amountOctas.toString()]
-    };
-    
-    // Submit transaction
-    const txnRequest = await client.generateTransaction(sender.address().toString(), payload, {
-      max_gas_amount: '2000',
-      gas_unit_price: '100'
+    const transaction = await client.transaction.build.simple({
+      sender: sender.accountAddress,
+      data: {
+        function: '0x1::aptos_account::transfer',
+        functionArguments: [to, amountOctas]
+      },
+      options: {
+        maxGasAmount: 2000,
+        gasUnitPrice: 100
+      }
     });
-    
-    const signedTxn = await client.signTransaction(sender, txnRequest);
-    const result = await client.submitTransaction(signedTxn);
-    
-    // Wait for transaction
-    await client.waitForTransaction(result.hash);
+
+    const result = await client.signAndSubmitTransaction({
+      signer: sender,
+      transaction
+    });
+
+    await client.waitForTransaction({ transactionHash: result.hash });
 
     return {
       hash: result.hash,
-      from: sender.address().toString(),
+      from: sender.accountAddress.toString(),
       to,
       amount: amount.toString(),
       chain,
@@ -285,7 +287,7 @@ export async function getFungibleAssetBalance(address, assetType, chain = DEFAUL
   try {
     const { client } = await createClient(chainConfig);
     
-    const resources = await client.getAccountResources(address);
+    const resources = await client.getAccountResources({ accountAddress: address });
     const faStoreResource = resources.find(r => 
       r.type.includes('0x1::fungible_asset::Store') && r.type.includes(assetType)
     );
@@ -327,34 +329,33 @@ export async function transferFungibleAsset({
     // Convert amount to smallest unit (6 decimals for fungible assets)
     const amountSmallest = Math.round(amount * Math.pow(10, 6));
     
-    // Build transaction payload
-    const payload = {
-      type: 'entry_function_payload',
-      function: '0x1::fungible_asset::transfer',
-      type_arguments: [assetType],
-      arguments: [
-        // From store address (need to derive)
-        sender.address().toString(),
-        to,
-        amountSmallest.toString()
-      ]
-    };
-    
-    // Submit transaction
-    const txnRequest = await client.generateTransaction(sender.address().toString(), payload, {
-      max_gas_amount: '2000',
-      gas_unit_price: '100'
+    const transaction = await client.transaction.build.simple({
+      sender: sender.accountAddress,
+      data: {
+        function: '0x1::fungible_asset::transfer',
+        typeArguments: [assetType],
+        functionArguments: [
+          sender.accountAddress.toString(),
+          to,
+          amountSmallest
+        ]
+      },
+      options: {
+        maxGasAmount: 2000,
+        gasUnitPrice: 100
+      }
     });
-    
-    const signedTxn = await client.signTransaction(sender, txnRequest);
-    const result = await client.submitTransaction(signedTxn);
-    
-    // Wait for transaction
-    await client.waitForTransaction(result.hash);
+
+    const result = await client.signAndSubmitTransaction({
+      signer: sender,
+      transaction
+    });
+
+    await client.waitForTransaction({ transactionHash: result.hash });
 
     return {
       hash: result.hash,
-      from: sender.address().toString(),
+      from: sender.accountAddress.toString(),
       to,
       amount: amount.toString(),
       assetType,
@@ -375,7 +376,7 @@ export async function getAccountResources(address, chain = DEFAULT_CHAIN) {
   
   try {
     const { client } = await createClient(chainConfig);
-    const resources = await client.getAccountResources(address);
+    const resources = await client.getAccountResources({ accountAddress: address });
     
     return resources.map(r => ({
       type: r.type,
@@ -395,7 +396,7 @@ export async function getTransaction(txHash, chain = DEFAULT_CHAIN) {
   
   try {
     const { client } = await createClient(chainConfig);
-    const txn = await client.getTransactionByHash(txHash);
+    const txn = await client.getTransactionByHash({ transactionHash: txHash });
     
     return {
       hash: txHash,
@@ -418,19 +419,23 @@ export async function estimateGas({ from, to, value, chain = DEFAULT_CHAIN }) {
   try {
     const { client } = await createClient(chainConfig);
     
-    const payload = {
-      type: 'entry_function_payload',
-      function: '0x1::coin::transfer',
-      type_arguments: [APT_COIN_TYPE],
-      arguments: [to, Math.round(value * Math.pow(10, 8)).toString()]
-    };
-    
-    const txnRequest = await client.generateTransaction(from, payload, {
-      max_gas_amount: '2000',
-      gas_unit_price: '100'
+    const simulationSigner = Account.generate();
+    const transaction = await client.transaction.build.simple({
+      sender: from,
+      data: {
+        function: '0x1::aptos_account::transfer',
+        functionArguments: [to, Math.round(value * Math.pow(10, 8))]
+      },
+      options: {
+        maxGasAmount: 2000,
+        gasUnitPrice: 100
+      }
     });
-    
-    const simulation = await client.simulateTransaction(txnRequest);
+
+    const simulation = await client.transaction.simulate.simple({
+      signerPublicKey: simulationSigner.publicKey,
+      transaction
+    });
     
     if (simulation && simulation.length > 0) {
       return {
