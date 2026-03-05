@@ -34,6 +34,16 @@ import {
 const ALCHEMY_KEY = process.env.ALCHEMY_API_KEY;
 
 // Alchemy URLs (only works for chains you've created apps for)
+
+const getEnvRpcList = (name) => {
+  const raw = process.env[name];
+  if (!raw) return [];
+  return raw
+    .split(',')
+    .map((value) => value.trim())
+    .filter(Boolean);
+};
+
 const getAlchemyUrl = (network) => ALCHEMY_KEY
   ? `https://${network}.g.alchemy.com/v2/${ALCHEMY_KEY}`
   : null;
@@ -42,7 +52,15 @@ const CHAINS = {
   // Testnets
   'base-sepolia': {
     chain: baseSepolia,
-    rpcs: [getAlchemyUrl('base-sepolia'), 'https://sepolia.base.org', 'https://base-sepolia.blockpi.network/v1/rpc/public'].filter(Boolean)
+    rpcs: [
+      getAlchemyUrl('base-sepolia'),
+      ...getEnvRpcList('BASE_SEPOLIA_RPCS'),
+      'https://base-sepolia-public.nodies.app',
+      'https://base-sepolia-rpc.publicnode.com',
+      'https://base-sepolia.drpc.org',
+      'https://sepolia.base.org',
+      'https://base-sepolia.blockpi.network/v1/rpc/public'
+    ].filter(Boolean)
   },
   'ethereum-sepolia': {
     chain: sepolia,
