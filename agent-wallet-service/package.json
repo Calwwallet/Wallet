@@ -43,7 +43,7 @@
   },
   "dependencies": {
     "@aptos-labs/ts-sdk": "^6.1.0",
-    "@coinbase/agentkit": "^0.2.3",
+    "@coinbase/agentkit": "^0.10.4",
     "@modelcontextprotocol/sdk": "^1.27.1",
     "@mysten/sui.js": "^0.54.1",
     "@solana/spl-token": "^0.4.0",
