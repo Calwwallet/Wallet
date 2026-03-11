@@ -6,7 +6,10 @@
  */
 
 import 'dotenv/config';
-import { Ed25519Keypair, JsonRpcProvider, RawSigner, fromB64, toB64 } from '@mysten/sui.js';
+import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
+import { SuiClient, getFullnodeUrl } from '@mysten/sui/client';
+import { Transaction } from '@mysten/sui/transactions';
+import { fromBase64, toBase64 } from '@mysten/sui/utils';
 import { randomBytes } from 'crypto';
 
 // ============================================================
@@ -90,6 +93,9 @@ const CHAINS = {
 
 const DEFAULT_CHAIN = 'sui-testnet';
 
+// Cache for clients
+const clientCache = new Map();
+
 /**
  * Get chain config by name
  */
@@ -102,17 +108,17 @@ function getChainConfig(chainName) {
 }
 
 /**
- * Create a Sui provider with fallback RPCs
+ * Create a Sui client with fallback RPCs
  */
-async function createProvider(chainConfig) {
+async function createClient(chainConfig) {
   const { rpcs } = chainConfig;
 
   for (const rpc of rpcs) {
     try {
-      const provider = new SuiJsonRpcClient({ url: rpc });
+      const client = new SuiClient({ url: rpc });
       // Test the connection
-      await provider.getLatestCheckpointSequenceNumber();
-      return { provider, rpc };
+      await client.getLatestCheckpointSequenceNumber();
+      return { client, rpc };
     } catch (error) {
       console.log(`RPC ${rpc} failed: ${error.message}, trying next...`);
       continue;
@@ -120,6 +126,20 @@ async function createProvider(chainConfig) {
   }
 
   throw new Error(`All RPCs failed for chain ${chainConfig.chain.name}`);
+}
+
+/**
+ * Get or create a cached client
+ */
+async function getClient(chain = DEFAULT_CHAIN) {
+  if (clientCache.has(chain)) {
+    return clientCache.get(chain);
+  }
+  
+  const chainConfig = getChainConfig(chain);
+  const { client } = await createClient(chainConfig);
+  clientCache.set(chain, client);
+  return client;
 }
 
 /**
@@ -153,11 +173,15 @@ export async function createWallet({ agentName, chain = DEFAULT_CHAIN, tenantId 
     const keypair = generateKeypair();
     const walletId = `wallet_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 
+    // Get the secret key as base64
+    const secretKey = keypair.getSecretKey();
+    const privateKeyBase64 = toBase64(secretKey);
+
     const wallet = {
       id: walletId,
       agentName,
       address: keypair.getPublicKey().toSuiAddress(),
-      privateKey: toBase64(decodeSuiPrivateKey(keypair.getSecretKey()).secretKey), // Base64 encoded
+      privateKey: privateKeyBase64,
       chain,
       createdAt: new Date().toISOString()
     };
@@ -180,11 +204,9 @@ export async function createWallet({ agentName, chain = DEFAULT_CHAIN, tenantId 
 /**
  * Get wallet from base64 private key
  */
-function getSignerFromBase64(privateKeyBase64) {
-  const privateKeyBytes = fromBase64(privateKeyBase64);
-  const normalized = privateKeyBytes.length === 33 ? privateKeyBytes.slice(1) : privateKeyBytes;
-  const keypair = Ed25519Keypair.fromSecretKey(normalized);
-  return keypair;
+function getKeypairFromBase64(privateKeyBase64) {
+  const secretKeyBytes = fromBase64(privateKeyBase64);
+  return Ed25519Keypair.fromSecretKey(secretKeyBytes);
 }
 
 /**
@@ -194,9 +216,9 @@ export async function getBalance(address, chain = DEFAULT_CHAIN) {
   const chainConfig = getChainConfig(chain);
   
   try {
-    const { provider } = await createProvider(chainConfig);
+    const client = await getClient(chain);
     
-    const balance = await provider.getBalance({
+    const balance = await client.getBalance({
       owner: address
     });
     
@@ -205,7 +227,7 @@ export async function getBalance(address, chain = DEFAULT_CHAIN) {
     return {
       address,
       chain,
-      balance: (parseInt(totalBalance) / Math.pow(10, 9)).toString(),
+      balance: (BigInt(totalBalance) / BigInt(1_000_000_000)).toString(),
       balanceMIST: totalBalance.toString(),
       nativeCurrency: chainConfig.chain.nativeCurrency
     };
@@ -234,27 +256,27 @@ export async function transfer({
   const chainConfig = getChainConfig(chain);
   
   try {
-    const { provider } = await createProvider(chainConfig);
-    const signer = getSignerFromBase64(fromPrivateKeyBase64);
+    const client = await getClient(chain);
+    const keypair = getKeypairFromBase64(fromPrivateKeyBase64);
     
     // Convert amount to MIST (9 decimals)
-    const amountMist = BigInt(Math.round(amount * Math.pow(10, 9)));
+    const amountMist = BigInt(Math.round(amount * 1_000_000_000));
     
     const tx = new Transaction();
     const [coin] = tx.splitCoins(tx.gas, [amountMist]);
     tx.transferObjects([coin], to);
 
-    const result = await provider.signAndExecuteTransaction({
-      signer,
+    const result = await client.signAndExecuteTransaction({
+      signer: keypair,
       transaction: tx,
       options: { showEffects: true }
     });
 
-    await provider.waitForTransaction({ digest: result.digest });
+    await client.waitForTransaction({ digest: result.digest });
 
     return {
       hash: result.digest,
-      from: signer.toSuiAddress(),
+      from: keypair.getPublicKey().toSuiAddress(),
       to,
       amount: amount.toString(),
       chain,
@@ -273,15 +295,15 @@ export async function getAllBalances(address, chain = DEFAULT_CHAIN) {
   const chainConfig = getChainConfig(chain);
   
   try {
-    const { provider } = await createProvider(chainConfig);
+    const client = await getClient(chain);
     
-    const balances = await provider.getAllBalances({
+    const balances = await client.getAllBalances({
       owner: address
     });
     
     return balances.map(b => ({
       coinType: b.coinType,
-      balance: (parseInt(b.totalBalance) / Math.pow(10, 9)).toString(),
+      balance: (BigInt(b.totalBalance) / BigInt(1_000_000_000)).toString(),
       symbol: b.coinType.split('::').pop()
     }));
   } catch (error) {
@@ -297,9 +319,9 @@ export async function getCoinMetadata(coinType, chain = DEFAULT_CHAIN) {
   const chainConfig = getChainConfig(chain);
   
   try {
-    const { provider } = await createProvider(chainConfig);
+    const client = await getClient(chain);
     
-    const metadata = await provider.getCoinMetadata({
+    const metadata = await client.getCoinMetadata({
       coinType
     });
     
@@ -323,9 +345,9 @@ export async function getOwnedObjects(address, chain = DEFAULT_CHAIN) {
   const chainConfig = getChainConfig(chain);
   
   try {
-    const { provider } = await createProvider(chainConfig);
+    const client = await getClient(chain);
     
-    const objects = await provider.getOwnedObjects({
+    const objects = await client.getOwnedObjects({
       owner: address
     });
     
@@ -347,8 +369,8 @@ export async function getTransaction(txDigest, chain = DEFAULT_CHAIN) {
   const chainConfig = getChainConfig(chain);
   
   try {
-    const { provider } = await createProvider(chainConfig);
-    const tx = await provider.getTransactionBlock({
+    const client = await getClient(chain);
+    const tx = await client.getTransactionBlock({
       digest: txDigest
     });
     
@@ -379,8 +401,8 @@ export async function moveCall({
   const chainConfig = getChainConfig(chain);
   
   try {
-    const { provider } = await createProvider(chainConfig);
-    const signer = getSignerFromBase64(fromPrivateKeyBase64);
+    const client = await getClient(chain);
+    const keypair = getKeypairFromBase64(fromPrivateKeyBase64);
 
     const tx = new Transaction();
     tx.moveCall({
@@ -389,17 +411,17 @@ export async function moveCall({
       arguments: args
     });
 
-    const result = await provider.signAndExecuteTransaction({
-      signer,
+    const result = await client.signAndExecuteTransaction({
+      signer: keypair,
       transaction: tx,
       options: { showEffects: true }
     });
 
-    await provider.waitForTransaction({ digest: result.digest });
+    await client.waitForTransaction({ digest: result.digest });
 
     return {
       hash: result.digest,
-      from: signer.toSuiAddress(),
+      from: keypair.getPublicKey().toSuiAddress(),
       packageId,
       module,
       function: funcName,
@@ -419,10 +441,10 @@ export async function estimateGas({ from, to, value, chain = DEFAULT_CHAIN }) {
   const chainConfig = getChainConfig(chain);
   
   try {
-    const { provider } = await createProvider(chainConfig);
+    const client = await getClient(chain);
     
     // Get gas price
-    const gasPrice = await provider.getReferenceGasPrice();
+    const gasPrice = await client.getReferenceGasPrice();
     
     // Estimate gas for a simple transfer
     const gasBudget = 1000000; // Standard gas budget
@@ -432,7 +454,7 @@ export async function estimateGas({ from, to, value, chain = DEFAULT_CHAIN }) {
       gasPrice: gasPrice.toString(),
       gasBudget: gasBudget.toString(),
       estimatedFeeMIST: gasFee.toString(),
-      estimatedFeeSUI: (parseInt(gasFee.toString()) / Math.pow(10, 9)).toString()
+      estimatedFeeSUI: (Number(gasFee) / 1_000_000_000).toString()
     };
   } catch (error) {
     console.error('Failed to estimate gas:', error);
@@ -481,3 +503,20 @@ export async function requestFaucet(address, chain = DEFAULT_CHAIN) {
     throw error;
   }
 }
+
+export default {
+  getSupportedChains,
+  createWallet,
+  getBalance,
+  getNativeBalance,
+  transfer,
+  getAllBalances,
+  getCoinMetadata,
+  getOwnedObjects,
+  getTransaction,
+  moveCall,
+  estimateGas,
+  getChainId,
+  isValidAddress,
+  requestFaucet
+};
