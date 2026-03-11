@@ -514,14 +514,12 @@ export function requireAuth(requiredPermission = 'read') {
     // Avoid duplicate auth/rate-limit checks when requireAuth is stacked
     if (req.authContext?.authenticated) {
       if (!hasPermission(requiredPermission, req.authContext.permissions)) {
-        return res.status(403).json({
-          error: requiredPermission === 'admin'
-            ? 'Admin permission required'
-            : 'Write permission required',
-          error_code: requiredPermission === 'admin'
-            ? 'ADMIN_PERMISSION_REQUIRED'
-            : 'WRITE_PERMISSION_REQUIRED'
-        });
+        return sendError(
+          res,
+          403,
+          requiredPermission === 'admin' ? 'ADMIN_PERMISSION_REQUIRED' : 'WRITE_PERMISSION_REQUIRED',
+          requiredPermission === 'admin' ? 'Admin permission required' : 'Write permission required'
+        );
       }
       return next();
     }
@@ -540,9 +538,7 @@ export function requireAuth(requiredPermission = 'read') {
     }
 
     if (!apiKey) {
-      return res.status(401).json({
-        error: 'API key required',
-        error_code: 'API_KEY_REQUIRED',
+      return sendError(res, 401, 'API_KEY_REQUIRED', 'API key required', {
         hint: 'Include X-API-Key header',
         setup: {
           onboarding: ONBOARDING_PATH,
@@ -561,11 +557,7 @@ export function requireAuth(requiredPermission = 'read') {
       : validateApiKeyJson(apiKey);
 
     if (!key) {
-      return res.status(403).json({
-        error: 'Invalid API key',
-        error_code: 'API_KEY_INVALID',
-        docs_url: '/README.md#api-keys'
-      });
+      return sendError(res, 403, 'API_KEY_INVALID', 'Invalid API key', { docs_url: '/README.md#api-keys' });
     }
 
     if (USE_DB_AUTH) {
@@ -589,9 +581,7 @@ export function requireAuth(requiredPermission = 'read') {
 
     if (!rateLimit.allowed) {
       res.set('Retry-After', String(retryAfterSeconds));
-      return res.status(429).json({
-        error: 'Rate limit exceeded',
-        error_code: 'RATE_LIMIT_EXCEEDED',
+      return sendError(res, 429, 'RATE_LIMIT_EXCEEDED', 'Rate limit exceeded', {
         tier,
         rpcMode,
         limit,
@@ -603,14 +593,12 @@ export function requireAuth(requiredPermission = 'read') {
     }
 
     if (!hasPermission(requiredPermission, permissions)) {
-      return res.status(403).json({
-        error: requiredPermission === 'admin'
-          ? 'Admin permission required'
-          : 'Write permission required',
-        error_code: requiredPermission === 'admin'
-          ? 'ADMIN_PERMISSION_REQUIRED'
-          : 'WRITE_PERMISSION_REQUIRED'
-      });
+      return sendError(
+        res,
+        403,
+        requiredPermission === 'admin' ? 'ADMIN_PERMISSION_REQUIRED' : 'WRITE_PERMISSION_REQUIRED',
+        requiredPermission === 'admin' ? 'Admin permission required' : 'Write permission required'
+      );
     }
 
     req.authContext = {

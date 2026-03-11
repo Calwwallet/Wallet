@@ -1,3 +1,4 @@
+import { sendError } from '../utils/error-envelope.js';
 /**
  * Simple Rate Limiting Middleware
  * Legacy middleware kept for compatibility.
@@ -51,8 +52,7 @@ export function rateLimit(options = {}) {
     if (data.count >= maxRequests) {
       const retryAfter = Math.ceil((data.windowStart + windowMs - now) / 1000);
       res.setHeader('Retry-After', retryAfter);
-      return res.status(429).json({
-        error: 'Too many requests',
+      return sendError(res, 429, 'RATE_LIMIT_EXCEEDED', 'Too many requests', {
         retryAfter: `${retryAfter} seconds`,
         limit: maxRequests,
         window: `${windowMs / 1000} seconds`

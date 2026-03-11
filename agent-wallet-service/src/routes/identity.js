@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { sendError } from '../utils/error-envelope.js';
 import { requireAuth } from '../middleware/auth.js';
 import { validate, createIdentitySchema, agentPaySchema, updateCapabilitySchema } from '../middleware/validation.js';
 import {
@@ -65,9 +66,9 @@ router.post('/create', requireAuth('write'), validate(createIdentitySchema), asy
   } catch (error) {
     console.error('Identity creation error:', error);
     if (error.message.includes('Invalid agent type')) {
-      return res.status(400).json({ error: error.message });
+      return sendError(res, 400, 'VALIDATION_ERROR', error.message);
     }
-    res.status(500).json({ error: error.message });
+    sendError(res, 500, 'INTERNAL_ERROR', error.message);
   }
 });
 
@@ -103,7 +104,7 @@ router.get('/:agentId', async (req, res) => {
   const identity = await getIdentity(agentId, { tenantId: req.tenant?.id });
 
   if (!identity) {
-    return res.status(404).json({ error: 'Identity not found' });
+    return sendError(res, 404, 'IDENTITY_NOT_FOUND', 'Identity not found');
   }
 
   res.json(identity);
@@ -120,17 +121,11 @@ router.post('/:agentId/pay', requireAuth('write'), validate(agentPaySchema), asy
 
     const identity = await getIdentity(agentId, { tenantId: req.tenant?.id });
     if (!identity) {
-      return res.status(404).json({
-        error: 'Identity not found',
-        error_code: 'AGENT_IDENTITY_NOT_FOUND'
-      });
+      return sendError(res, 404, 'AGENT_IDENTITY_NOT_FOUND', 'Identity not found');
     }
 
     if (!identity.wallet) {
-      return res.status(400).json({
-        error: 'Identity has no associated wallet',
-        error_code: 'AGENT_IDENTITY_NO_WALLET'
-      });
+      return sendError(res, 400, 'AGENT_IDENTITY_NO_WALLET', 'Identity has no associated wallet');
     }
 
     const from = identity.wallet;
@@ -202,10 +197,7 @@ router.post('/:agentId/pay', requireAuth('write'), validate(agentPaySchema), asy
       errorCode = 'INSUFFICIENT_BALANCE';
     }
 
-    res.status(500).json({
-      error: errorMessage,
-      error_code: errorCode
-    });
+    sendError(res, 500, errorCode, errorMessage);
   }
 });
 
@@ -221,7 +213,7 @@ router.patch('/:agentId/capability', requireAuth('write'), validate(updateCapabi
     const identity = await updateCapability(agentId, capability, granted ?? true, { tenantId: req.tenant?.id });
     res.json({ success: true, identity });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    sendError(res, 500, 'INTERNAL_ERROR', error.message);
   }
 });
 
@@ -234,11 +226,11 @@ router.post('/:agentId/revoke', requireAuth('write'), async (req, res) => {
     const { agentId } = req.params;
     const revoked = await revokeIdentity(agentId, { tenantId: req.tenant?.id });
     if (!revoked) {
-      return res.status(404).json({ error: 'Identity not found' });
+      return sendError(res, 404, 'IDENTITY_NOT_FOUND', 'Identity not found');
     }
     res.json({ success: true, message: 'Identity revoked' });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    sendError(res, 500, 'INTERNAL_ERROR', error.message);
   }
 });
 
@@ -252,7 +244,7 @@ router.get('/:agentId/credential', requireAuth('read'), async (req, res) => {
     const credential = await exportVerifiableCredential(agentId, { tenantId: req.tenant?.id });
     res.json(credential);
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    sendError(res, 500, 'INTERNAL_ERROR', error.message);
   }
 });
 
@@ -266,7 +258,7 @@ router.post('/:agentId/proof', async (req, res) => {
     const proof = await generateVerificationProof(agentId, { tenantId: req.tenant?.id });
     res.json(proof);
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    sendError(res, 500, 'INTERNAL_ERROR', error.message);
   }
 });
 
@@ -280,7 +272,7 @@ router.post('/:agentId/credential/issue', requireAuth('write'), async (req, res)
     const vc = await issueVerifiableCredential(agentId, { tenantId: req.tenant?.id });
     res.json(vc);
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    sendError(res, 500, 'INTERNAL_ERROR', error.message);
   }
 });
 

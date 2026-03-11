@@ -12,6 +12,7 @@ import agentsRoutes from './routes/agents.js';
 import explorerRoutes from './routes/explorer.js';
 import socialRoutes from './routes/social.js';
 import { requireAuth, createApiKey, listApiKeys, revokeApiKey, getOnboardingState } from './middleware/auth.js';
+import { validate, createApiKeySchema, apiKeyPrefixParamSchema } from './middleware/validation.js';
 import { getAllWallets } from './services/viem-wallet.js';
 import { listIdentities } from './services/agent-identity.js';
 import { getHistory } from './services/tx-history.js';
@@ -21,6 +22,7 @@ import { getAllSupportedChains, getChainAvailability } from './services/chain-ma
 import { logger, requestLogger, errorLogger } from './services/logger.js';
 import { initWebSocket, getWsStats, closeWebSocket, WSEvents } from './services/websocket.js';
 import pkg from '../package.json' with { type: 'json' };
+import { sendError, normalizeErrorDetails } from './utils/error-envelope.js';
 import { WalletMCPServer } from './mcp-server.js';
 
 // Initialize MCP Server on startup
@@ -260,13 +262,13 @@ app.get('/onboarding', async (req, res) => {
 });
 
 // API Key management (admin only)
-app.post('/api-keys', requireAuth('admin'), async (req, res) => {
+app.post('/api-keys', requireAuth('admin'), validate(createApiKeySchema), async (req, res) => {
   try {
-    const { name, permissions } = req.body;
+    const { name, permissions } = req.validated.body;
     const key = await createApiKey(name, permissions, { tenantId: req.tenant?.id });
     res.json({ success: true, key });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, 500, 'INTERNAL_ERROR', err.message);
   }
 });
 
@@ -275,16 +277,17 @@ app.get('/api-keys', requireAuth('admin'), async (req, res) => {
     const keys = await listApiKeys({ tenantId: req.tenant?.id });
     res.json({ keys });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, 500, 'INTERNAL_ERROR', err.message);
   }
 });
 
-app.delete('/api-keys/:prefix', requireAuth('admin'), async (req, res) => {
+app.delete('/api-keys/:prefix', requireAuth('admin'), validate(apiKeyPrefixParamSchema, 'params'), async (req, res) => {
   try {
-    const revoked = await revokeApiKey(req.params.prefix, { tenantId: req.tenant?.id });
+    const { prefix } = req.validated.params;
+    const revoked = await revokeApiKey(prefix, { tenantId: req.tenant?.id });
     res.json({ success: revoked });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, 500, 'INTERNAL_ERROR', err.message);
   }
 });
 
@@ -341,10 +344,9 @@ app.get('/ws', (req, res) => {
 app.use((err, req, res, next) => {
   errorLogger(err, req, res, () => { });
   const statusCode = err.statusCode || err.status || 500;
-  res.status(statusCode).json({
-    error: err.message || 'Internal server error',
-    ...(process.env.NODE_ENV === 'development' && { stack: err.stack })
-  });
+  const errorCode = err.errorCode || (statusCode === 400 ? 'VALIDATION_ERROR' : statusCode === 401 ? 'AUTHENTICATION_REQUIRED' : statusCode === 403 ? 'PERMISSION_DENIED' : statusCode === 404 ? 'NOT_FOUND' : statusCode === 429 ? 'RATE_LIMIT_EXCEEDED' : 'INTERNAL_ERROR');
+  const details = normalizeErrorDetails(err.details || (process.env.NODE_ENV === 'development' ? { stack: err.stack } : null));
+  sendError(res, statusCode, errorCode, err.message || 'Internal server error', details);
 });
 
 // Create HTTP server for WebSocket support

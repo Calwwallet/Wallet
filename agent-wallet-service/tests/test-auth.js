@@ -39,6 +39,13 @@ function resolveApiKey() {
 
 const API_KEY = resolveApiKey();
 
+function extractErrorMessage(body) {
+  if (!body) return '';
+  if (typeof body.error === 'string') return body.error;
+  if (body.error && typeof body.error.message === 'string') return body.error.message;
+  return '';
+}
+
 async function waitForHealth(timeoutMs) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -123,7 +130,7 @@ async function testMissingApiKey() {
   }
   
   const body = await response.json();
-  if (!body.error?.includes('API key required')) {
+  if (!extractErrorMessage(body).includes('API key required')) {
     throw new Error(`Expected API key error, got: ${JSON.stringify(body)}`);
   }
   
@@ -159,7 +166,7 @@ async function testReadPermission() {
   });
   
   if (!createBody.wallet?.address) {
-    const errorText = String(createBody?.error || '');
+    const errorText = String(extractErrorMessage(createBody) || '');
     if (errorText.includes('Encryption key required') || errorText.includes('WALLET_ENCRYPTION_KEY')) {
       throw new Error(
         'Failed to create wallet: server encryption key is not configured. ' +
@@ -173,7 +180,7 @@ async function testReadPermission() {
   
   const { response: readRes, body: readBody } = await request(`/wallet/${address}/balance`);
   
-  if (!readRes.ok && !readBody.error?.includes('RPCs failed')) {
+  if (!readRes.ok && !extractErrorMessage(readBody).includes('RPCs failed')) {
     console.log('Balance check response:', readBody);
   }
   

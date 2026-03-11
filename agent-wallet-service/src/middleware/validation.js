@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { sendError } from '../utils/error-envelope.js';
 
 /**
  * Zod Validation Middleware
@@ -119,6 +120,21 @@ export const updateCapabilitySchema = z.object({
 });
 
 // ============================================================
+// API Key Schemas
+// ============================================================
+
+/** POST /api-keys */
+export const createApiKeySchema = z.object({
+  name: z.string().min(1).max(100),
+  permissions: z.array(z.string().min(1)).min(1)
+});
+
+/** DELETE /api-keys/:prefix */
+export const apiKeyPrefixParamSchema = z.object({
+  prefix: z.string().min(1).max(32)
+});
+
+// ============================================================
 // ENS Schemas
 // ============================================================
 
@@ -155,15 +171,18 @@ export function validate(schema, property = 'body') {
       next();
     } catch (error) {
       if (error instanceof z.ZodError) {
-        return res.status(400).json({
-          error: 'Validation failed',
-          details: error.errors.map(err => ({
+        return sendError(
+          res,
+          400,
+          'VALIDATION_ERROR',
+          'Validation failed',
+          error.errors.map(err => ({
             field: err.path.join('.'),
             message: err.message
           }))
-        });
+        );
       }
-      return res.status(500).json({ error: 'Validation error' });
+      return sendError(res, 500, 'INTERNAL_ERROR', 'Validation error');
     }
   };
 }
@@ -176,10 +195,7 @@ export function validateAddress(paramName = 'address') {
     const address = req.params[paramName];
     const result = ethAddressSchema.safeParse(address);
     if (!result.success) {
-      return res.status(400).json({
-        error: `Invalid ${paramName}`,
-        details: result.error.errors
-      });
+      return sendError(res, 400, 'VALIDATION_ERROR', `Invalid ${paramName}`, result.error.errors);
     }
     next();
   };
@@ -193,9 +209,7 @@ export function validateAgentId(paramName = 'agentId') {
     const agentId = req.params[paramName];
     // Agent ID should be a non-empty string
     if (!agentId || typeof agentId !== 'string' || agentId.length === 0) {
-      return res.status(400).json({
-        error: `Invalid ${paramName}`
-      });
+      return sendError(res, 400, 'VALIDATION_ERROR', `Invalid ${paramName}`);
     }
     next();
   };

@@ -65,7 +65,7 @@ router.post('/create', requireAuth('write'), validate(createWalletSchema), async
       .slice(0, 100);             // Limit length
 
     if (!sanitizedAgentName || sanitizedAgentName.length < 1) {
-      return res.status(400).json({ error: 'Agent name is required after sanitization' });
+      return sendError(res, 400, 'VALIDATION_ERROR', 'Agent name is required after sanitization');
     }
 
     const runtime = getRpcRuntimeOptions(req);
@@ -80,7 +80,7 @@ router.post('/create', requireAuth('write'), validate(createWalletSchema), async
     });
   } catch (error) {
     console.error('Wallet creation error:', error);
-    res.status(500).json({ error: error.message });
+    sendError(res, 500, 'INTERNAL_ERROR', error.message);
   }
 });
 
@@ -99,7 +99,7 @@ router.post('/import', requireAuth('write'), validate(importWalletSchema), async
     });
   } catch (error) {
     console.error('Wallet import error:', error);
-    res.status(400).json({ error: error.message });
+    sendError(res, 400, 'VALIDATION_ERROR', error.message);
   }
 });
 
@@ -120,7 +120,7 @@ router.get('/policies', requireAuth('read'), async (req, res) => {
       policies
     });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    sendError(res, 500, 'INTERNAL_ERROR', error.message);
   }
 });
 
@@ -154,7 +154,7 @@ router.get('/list', requireAuth('read'), async (req, res) => {
       wallets
     });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    sendError(res, 500, 'INTERNAL_ERROR', error.message);
   }
 });
 
@@ -181,7 +181,7 @@ router.get('/policy/:address', async (req, res) => {
     const policy = await getPolicy(address, { tenantId: req.tenant?.id });
     res.json({ address, policy, presets: getPolicyPresets() });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    sendError(res, 500, 'INTERNAL_ERROR', error.message);
   }
 });
 
@@ -199,7 +199,7 @@ router.put('/policy/:address', requireAuth('write'), validate(setPolicySchema, '
       : await setPolicy(address, overrides, { tenantId: req.tenant?.id });
     res.json({ success: true, address, policy, preset: preset || null });
   } catch (error) {
-    res.status(400).json({ error: error.message });
+    sendError(res, 400, 'VALIDATION_ERROR', error.message);
   }
 });
 
@@ -243,7 +243,7 @@ router.post('/policy/:address/evaluate', requireAuth('read'), validate(evaluateP
       explanation
     });
   } catch (error) {
-    res.status(400).json({ error: error.message });
+    sendError(res, 400, 'VALIDATION_ERROR', error.message);
   }
 });
 
@@ -281,7 +281,7 @@ router.get('/tx/:hash', requireRpcUrlForByo, async (req, res) => {
     const receipt = await getTransactionReceipt(hash, chain, runtime);
     res.json(receipt);
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    sendError(res, 500, 'INTERNAL_ERROR', error.message);
   }
 });
 
@@ -297,7 +297,7 @@ router.post('/estimate-gas', requireRpcUrlForByo, validate(estimateGasSchema), a
     res.json(estimate);
   } catch (error) {
     console.error('Gas estimation error:', error);
-    res.status(500).json({ error: error.message });
+    sendError(res, 500, 'INTERNAL_ERROR', error.message);
   }
 });
 
@@ -331,7 +331,7 @@ router.get('/pending', requireAuth('read'), async (req, res) => {
     });
   } catch (error) {
     console.error('Get all pending approvals error:', error);
-    res.status(500).json({ error: error.message });
+    sendError(res, 500, 'INTERNAL_ERROR', error.message);
   }
 });
 
@@ -352,13 +352,13 @@ router.get('/pending/:id', requireAuth('read'), async (req, res) => {
     const approval = approvals.find(a => a.id === id);
 
     if (!approval) {
-      return res.status(404).json({ error: 'Pending approval not found' });
+      return sendError(res, 404, 'PENDING_APPROVAL_NOT_FOUND', 'Pending approval not found');
     }
 
     res.json({ approval });
   } catch (error) {
     console.error('Get pending approval error:', error);
-    res.status(500).json({ error: error.message });
+    sendError(res, 500, 'INTERNAL_ERROR', error.message);
   }
 });
 
@@ -377,7 +377,7 @@ router.get('/pending/:id/status', requireAuth('read'), async (req, res) => {
     res.json(result);
   } catch (error) {
     console.error('Check approval status error:', error);
-    res.status(500).json({ error: error.message });
+    sendError(res, 500, 'INTERNAL_ERROR', error.message);
   }
 });
 
@@ -396,9 +396,7 @@ router.post('/pending/:id/approve', requireAuth('write'), async (req, res) => {
     });
 
     if (!result) {
-      return res.status(404).json({
-        error: 'Pending approval not found or already processed'
-      });
+      return sendError(res, 404, 'PENDING_APPROVAL_NOT_FOUND', 'Pending approval not found or already processed');
     }
 
     res.json({
@@ -413,7 +411,7 @@ router.post('/pending/:id/approve', requireAuth('write'), async (req, res) => {
     });
   } catch (error) {
     console.error('Approve pending approval error:', error);
-    res.status(500).json({ error: error.message });
+    sendError(res, 500, 'INTERNAL_ERROR', error.message);
   }
 });
 
@@ -432,9 +430,7 @@ router.post('/pending/:id/reject', requireAuth('write'), async (req, res) => {
     });
 
     if (!result) {
-      return res.status(404).json({
-        error: 'Pending approval not found or already processed'
-      });
+      return sendError(res, 404, 'PENDING_APPROVAL_NOT_FOUND', 'Pending approval not found or already processed');
     }
 
     res.json({
@@ -449,7 +445,7 @@ router.post('/pending/:id/reject', requireAuth('write'), async (req, res) => {
     });
   } catch (error) {
     console.error('Reject pending approval error:', error);
-    res.status(500).json({ error: error.message });
+    sendError(res, 500, 'INTERNAL_ERROR', error.message);
   }
 });
 
@@ -466,9 +462,7 @@ router.post('/pending/:id/cancel', requireAuth('write'), async (req, res) => {
     });
 
     if (!result) {
-      return res.status(404).json({
-        error: 'Pending approval not found or already processed'
-      });
+      return sendError(res, 404, 'PENDING_APPROVAL_NOT_FOUND', 'Pending approval not found or already processed');
     }
 
     res.json({
@@ -481,7 +475,7 @@ router.post('/pending/:id/cancel', requireAuth('write'), async (req, res) => {
     });
   } catch (error) {
     console.error('Cancel pending approval error:', error);
-    res.status(500).json({ error: error.message });
+    sendError(res, 500, 'INTERNAL_ERROR', error.message);
   }
 });
 
@@ -506,7 +500,7 @@ router.get('/:address', requireAuth('read'), async (req, res) => {
     const wallet = await getWalletByAddress(address, { tenantId });
 
     if (!wallet) {
-      return res.status(404).json({ error: `Wallet not found: ${address}`, error_code: 'WALLET_NOT_FOUND' });
+      return sendError(res, 404, 'WALLET_NOT_FOUND', `Wallet not found: ${address}`);
     }
 
     res.json({
@@ -517,7 +511,7 @@ router.get('/:address', requireAuth('read'), async (req, res) => {
       createdAt: wallet.createdAt
     });
   } catch (error) {
-    res.status(500).json({ error: error.message, error_code: 'INTERNAL_ERROR' });
+    sendError(res, 500, 'INTERNAL_ERROR', error.message);
   }
 });
 
@@ -539,10 +533,7 @@ router.get('/:address/balance', requireRpcUrlForByo, async (req, res) => {
     console.error('Balance check error:', error);
     const rpcUnavailable = typeof error?.message === 'string' && error.message.includes('All RPCs failed');
     const statusCode = rpcUnavailable ? 503 : 500;
-    res.status(statusCode).json({
-      error: error.message,
-      error_code: rpcUnavailable ? 'RPC_UNAVAILABLE' : 'INTERNAL_ERROR'
-    });
+    sendError(res, statusCode, rpcUnavailable ? 'RPC_UNAVAILABLE' : 'INTERNAL_ERROR', error.message);
   }
 });
 
@@ -561,7 +552,7 @@ router.get('/:address/balance/all', blockByoRpcForMultiChain, async (req, res) =
     });
   } catch (error) {
     console.error('Multi-chain balance error:', error);
-    res.status(500).json({ error: error.message });
+    sendError(res, 500, 'INTERNAL_ERROR', error.message);
   }
 });
 
@@ -598,7 +589,7 @@ router.post('/:address/send', requireAuth('write'), requireRpcUrlForByo, validat
     });
   } catch (error) {
     console.error('Transaction error:', error);
-    res.status(500).json({ error: error.message });
+    sendError(res, 500, 'INTERNAL_ERROR', error.message);
   }
 });
 
@@ -618,7 +609,7 @@ router.post('/:address/sweep', requireAuth('write'), requireRpcUrlForByo, valida
     });
   } catch (error) {
     console.error('Sweep error:', error);
-    res.status(500).json({ error: error.message });
+    sendError(res, 500, 'INTERNAL_ERROR', error.message);
   }
 });
 
@@ -648,7 +639,7 @@ router.get('/:address/pending', requireAuth('read'), async (req, res) => {
     });
   } catch (error) {
     console.error('Get pending approvals error:', error);
-    res.status(500).json({ error: error.message });
+    sendError(res, 500, 'INTERNAL_ERROR', error.message);
   }
 });
 

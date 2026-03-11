@@ -90,6 +90,7 @@ async function main() {
 
     await runNodeScript('tests/test-policy.js', testEnv);
     await runNodeScript('tests/test-wallet.js', testEnv);
+    await runNodeScript('tests/test-error-contract.js', testEnv);
   } finally {
     if (ownsServer) {
       await stopServer(serverProcess);

@@ -23,6 +23,13 @@ function resolveApiKey() {
 
 const API_KEY = resolveApiKey();
 
+function extractErrorMessage(body) {
+  if (!body) return '';
+  if (typeof body.error === 'string') return body.error;
+  if (body.error && typeof body.error.message === 'string') return body.error.message;
+  return '';
+}
+
 if (!API_KEY) {
   throw new Error('No API key available. Set TEST_API_KEY or create api-keys.json.');
 }
@@ -120,7 +127,7 @@ async function testGetBalance(address) {
   const { response, body } = await request(`/wallet/${address}/balance`);
 
   if (!response.ok) {
-    const message = body?.error || JSON.stringify(body);
+    const message = extractErrorMessage(body) || JSON.stringify(body);
     if (message.includes('All RPCs failed')) {
       console.warn('⚠️ Skipping balance assertion due to unavailable RPC endpoints.');
       return;

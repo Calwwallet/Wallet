@@ -280,6 +280,41 @@ GET  /ens/list                           List managed ENS names
 GET  /ens/:name                          Resolve ENS details
 ```
 
+## Error envelope
+
+All API errors now use a single response shape:
+
+```json
+{
+  "error": {
+    "code": "VALIDATION_ERROR",
+    "message": "Validation failed",
+    "details": [
+      { "field": "agentName", "message": "Required" }
+    ]
+  }
+}
+```
+
+Examples by status code:
+
+```json
+// 401
+{ "error": { "code": "API_KEY_REQUIRED", "message": "API key required" } }
+
+// 403
+{ "error": { "code": "API_KEY_INVALID", "message": "Invalid API key" } }
+
+// 404
+{ "error": { "code": "IDENTITY_NOT_FOUND", "message": "Identity not found" } }
+
+// 429
+{ "error": { "code": "RATE_LIMIT_EXCEEDED", "message": "Rate limit exceeded" } }
+
+// 500
+{ "error": { "code": "INTERNAL_ERROR", "message": "Internal server error" } }
+```
+
 ## Common errors
 
 | Error case | HTTP status | Typical message | What to do |
