@@ -27,6 +27,12 @@ if (!API_KEY) {
   throw new Error('No API key available. Set TEST_API_KEY or create api-keys.json.');
 }
 
+function assert(condition, message) {
+  if (!condition) {
+    throw new Error(message);
+  }
+}
+
 async function request(path, options = {}) {
   const response = await fetch(`${API_URL}${path}`, {
     ...options,
@@ -75,6 +81,31 @@ async function testCreateWallet() {
   return body.wallet.address;
 }
 
+async function testGetWalletByAddress(address) {
+  console.log('\n📍 Testing wallet lookup returns 200 for known address...');
+  const { response, body } = await request(`/wallet/${address}`);
+
+  assert(response.status === 200, `Expected /wallet/:address to return 200, got ${response.status}: ${JSON.stringify(body)}`);
+  assert(body.address?.toLowerCase() === address.toLowerCase(), `Expected matching wallet address in response: ${JSON.stringify(body)}`);
+}
+
+async function testGetWalletByAddressNotFound() {
+  console.log('\n🚫 Testing wallet lookup returns 404 for unknown address...');
+  const missing = '0x0000000000000000000000000000000000000001';
+  const { response, body } = await request(`/wallet/${missing}`);
+
+  assert(response.status === 404, `Expected 404 for unknown wallet, got ${response.status}: ${JSON.stringify(body)}`);
+  assert(body.error_code === 'WALLET_NOT_FOUND', `Expected WALLET_NOT_FOUND, got: ${JSON.stringify(body)}`);
+}
+
+async function testGetWalletByAddressInvalidFormat() {
+  console.log('\n🧪 Testing wallet lookup returns 404 for invalid address format...');
+  const { response, body } = await request('/wallet/not-a-wallet-address');
+
+  assert(response.status === 404, `Expected 404 for invalid address format, got ${response.status}: ${JSON.stringify(body)}`);
+  assert(body.error_code === 'WALLET_NOT_FOUND', `Expected WALLET_NOT_FOUND for invalid address, got: ${JSON.stringify(body)}`);
+}
+
 async function testGetBalance(address) {
   console.log('\n💰 Testing balance check...');
   const { response, body } = await request(`/wallet/${address}/balance`);
@@ -92,7 +123,7 @@ async function testGetBalance(address) {
 }
 
 async function testCreateIdentity(walletAddress) {
-  console.log('\n🆔 Testing identity creation...');
+  console.log('\n🆔 Testing identity creation (canonical endpoint /identity/create)...');
   const { response, body } = await request('/identity/create', {
     method: 'POST',
     body: JSON.stringify({
@@ -114,6 +145,29 @@ async function testCreateIdentity(walletAddress) {
   console.log('Identity created:', body.identity.id);
 }
 
+async function testLegacyIdentityPathNotAvailable(walletAddress) {
+  console.log('\n🧭 Testing legacy identity path is not used/available...');
+  const { response } = await request('/identity/register', {
+    method: 'POST',
+    body: JSON.stringify({
+      walletAddress,
+      agentName: 'Legacy Test Agent',
+      description: 'legacy path check',
+      agentType: 'assistant'
+    })
+  });
+
+  assert(response.status === 404, `Expected legacy identity path to return 404, got ${response.status}`);
+}
+
+async function testProtectedEndpointRequiresApiKey(address) {
+  console.log('\n🔒 Testing protected endpoint rejects missing X-API-Key...');
+  const response = await fetch(`${API_URL}/wallet/${address}`);
+  const body = await response.json();
+
+  assert(response.status === 401, `Expected 401 when X-API-Key is missing, got ${response.status}: ${JSON.stringify(body)}`);
+}
+
 
 async function runTests() {
   console.log('🦞 Agent Wallet Service Smoke Tests');
@@ -125,8 +179,13 @@ async function runTests() {
   }
 
   const address = await testCreateWallet();
+  await testGetWalletByAddress(address);
+  await testGetWalletByAddressNotFound();
+  await testGetWalletByAddressInvalidFormat();
   await testGetBalance(address);
+  await testProtectedEndpointRequiresApiKey(address);
   await testCreateIdentity(address);
+  await testLegacyIdentityPathNotAvailable(address);
 
   console.log('\n✅ All tests completed!');
 }
