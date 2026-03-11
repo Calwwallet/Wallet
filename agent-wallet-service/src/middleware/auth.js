@@ -12,6 +12,7 @@ const ONBOARDING_PATH = '/onboarding';
 const USE_DB_AUTH = process.env.AUTH_BACKEND === 'db' || process.env.STORAGE_BACKEND === 'db';
 const DEFAULT_TENANT_ID = process.env.DEFAULT_TENANT_ID || 'tenant_default';
 const DEFAULT_TENANT_NAME = process.env.DEFAULT_TENANT_NAME || 'Default tenant';
+const ALLOW_QUERY_API_KEY_FALLBACK = process.env.ALLOW_QUERY_API_KEY_FALLBACK === 'true' && process.env.NODE_ENV !== 'production';
 
 // Cache for development secret (generated once per process startup)
 let devHashSecret = null;
@@ -88,18 +89,20 @@ function loadApiKeysJson() {
   const existing = loadApiKeysRaw();
   if (existing.length > 0) return existing;
 
+  const rawKey = `sk_live_${randomBytes(32).toString('hex')}`;
   const defaultKey = {
-    key: `sk_live_${randomBytes(32).toString('hex')}`,
+    keyHash: hashApiKey(rawKey),
+    keyPrefix: rawKey.slice(0, 12),
     name: 'admin',
     createdAt: new Date().toISOString(),
     permissions: ['read', 'write', 'admin']
   };
   saveApiKeys([defaultKey]);
 
-  const showSecret = process.env.SHOW_BOOTSTRAP_SECRET === 'true';
-  const preview = `${defaultKey.key.slice(0, 12)}...`;
+  const showSecret = process.env.SHOW_BOOTSTRAP_SECRET === 'true' && process.env.NODE_ENV !== 'production';
+  const preview = `${rawKey.slice(0, 12)}...`;
   if (showSecret) {
-    console.log(`🔑 Generated admin API key: ${defaultKey.key}`);
+    console.log(`🔑 Generated admin API key: ${rawKey}`);
   } else {
     console.log(`🔑 Generated admin API key: ${preview} (set SHOW_BOOTSTRAP_SECRET=true to print full key)`);
   }
@@ -142,7 +145,7 @@ async function initDbAuth() {
         [id, DEFAULT_TENANT_ID, keyHash, keyPrefix, 'admin', JSON.stringify(['read', 'write', 'admin'])]
       );
 
-      const showSecret = process.env.SHOW_BOOTSTRAP_SECRET === 'true';
+      const showSecret = process.env.SHOW_BOOTSTRAP_SECRET === 'true' && process.env.NODE_ENV !== 'production';
       const preview = `${rawKey.slice(0, 12)}...`;
       if (showSecret) {
         console.log(`🔑 Generated admin API key: ${rawKey}`);
@@ -333,15 +336,22 @@ export async function createApiKey(name, permissions = ['read', 'write'], { tena
     };
   }
 
+  const rawKey = `sk_${randomBytes(32).toString('hex')}`;
   const newKey = {
-    key: `sk_${randomBytes(32).toString('hex')}`,
+    keyHash: hashApiKey(rawKey),
+    keyPrefix: rawKey.slice(0, 12),
     name,
     createdAt: new Date().toISOString(),
     permissions
   };
   apiKeys.push(newKey);
   saveApiKeys(apiKeys);
-  return newKey;
+  return {
+    key: rawKey,
+    name,
+    createdAt: newKey.createdAt,
+    permissions
+  };
 }
 
 /**
@@ -369,7 +379,7 @@ export async function listApiKeys({ tenantId } = {}) {
   }
 
   return apiKeys.map(k => ({
-    key: k.key.slice(0, 12) + '...',
+    key: `${k.keyPrefix}...`,
     name: k.name,
     createdAt: k.createdAt,
     permissions: k.permissions
@@ -402,7 +412,7 @@ export async function getOnboardingState() {
   return {
     hasApiKeys: apiKeys.length > 0,
     apiKeyCount: apiKeys.length,
-    firstKeyPrefix: apiKeys[0]?.key?.slice(0, 12) || null,
+    firstKeyPrefix: apiKeys[0]?.keyPrefix || null,
     docsPath: '/README.md#quick-start',
     onboardingPath: ONBOARDING_PATH
   };
@@ -425,7 +435,7 @@ export async function revokeApiKey(keyPrefix, { tenantId } = {}) {
     return res.rowCount > 0;
   }
 
-  const index = apiKeys.findIndex(k => k.key.startsWith(keyPrefix));
+  const index = apiKeys.findIndex(k => k.keyPrefix === keyPrefix || k.keyPrefix.startsWith(keyPrefix));
   if (index === -1) return false;
   apiKeys.splice(index, 1);
   saveApiKeys(apiKeys);
@@ -436,7 +446,8 @@ export async function revokeApiKey(keyPrefix, { tenantId } = {}) {
  * Validate API key
  */
 function validateApiKeyJson(providedKey) {
-  const key = apiKeys.find(k => k.key === providedKey);
+  const providedHash = hashApiKey(providedKey);
+  const key = apiKeys.find(k => k.keyHash === providedHash);
   if (!key) return null;
   return key;
 }
@@ -472,7 +483,7 @@ function buildRateLimitSubject({ isDbAuth, key, req }) {
   if (isDbAuth) {
     return `db_fallback:${key?.id || 'unknown'}`;
   }
-  return key?.key || 'anonymous';
+  return key?.keyHash || 'anonymous';
 }
 
 function hasPermission(requiredPermission, permissions = []) {
@@ -538,7 +549,17 @@ export function requireAuth(requiredPermission = 'read') {
     }
 
     // Get API key from header only
-    const apiKey = req.headers['x-api-key'];
+    const apiKeyFromHeader = req.headers['x-api-key'];
+    const apiKeyFromQuery = req.query?.apiKey;
+    const apiKey = apiKeyFromHeader || (ALLOW_QUERY_API_KEY_FALLBACK ? apiKeyFromQuery : undefined);
+
+    if (!ALLOW_QUERY_API_KEY_FALLBACK && !apiKeyFromHeader && apiKeyFromQuery) {
+      return res.status(401).json({
+        error: 'API key query parameter is not supported',
+        error_code: 'API_KEY_QUERY_REJECTED',
+        hint: 'Use X-API-Key header only'
+      });
+    }
 
     if (!apiKey) {
       return res.status(401).json({
@@ -639,7 +660,9 @@ export function optionalAuth(req, res, next) {
         return;
       }
 
-      const apiKey = req.headers['x-api-key'];
+      const apiKeyFromHeader = req.headers['x-api-key'];
+      const apiKeyFromQuery = req.query?.apiKey;
+      const apiKey = apiKeyFromHeader || (ALLOW_QUERY_API_KEY_FALLBACK ? apiKeyFromQuery : undefined);
       if (!apiKey) return;
 
       const key = USE_DB_AUTH

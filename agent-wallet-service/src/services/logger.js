@@ -7,6 +7,36 @@ import pino from 'pino';
 
 const isDevelopment = process.env.NODE_ENV !== 'production';
 
+const SENSITIVE_KEY_PATTERN = /(api[-_]?key|authorization|token|secret|password|private[-_]?key|rpcurl|rpc_url)/i;
+
+
+function redactUrl(url) {
+  if (typeof url !== 'string') return url;
+  return url.replace(/([?&](?:apiKey|apikey|rpcUrl|rpcurl|token|secret)=)[^&]*/gi, '$1[REDACTED]');
+}
+
+export function redactSecrets(value) {
+  if (Array.isArray(value)) {
+    return value.map((item) => redactSecrets(item));
+  }
+
+  if (!value || typeof value !== 'object') {
+    return value;
+  }
+
+  const redacted = {};
+  for (const [key, item] of Object.entries(value)) {
+    if (SENSITIVE_KEY_PATTERN.test(key)) {
+      redacted[key] = '[REDACTED]';
+    } else if (item && typeof item === 'object') {
+      redacted[key] = redactSecrets(item);
+    } else {
+      redacted[key] = item;
+    }
+  }
+  return redacted;
+}
+
 /**
  * Create logger instance with proper configuration
  */
@@ -52,15 +82,14 @@ export function requestLogger(req, res, next) {
   logger.info({
     req: {
       method: req.method,
-      url: req.url,
-      headers: {
+      url: redactUrl(req.url),
+      headers: redactSecrets({
         host: req.headers.host,
         'user-agent': req.headers['user-agent'],
-        'content-type': req.headers['content-type']
-      },
-      // Don't log sensitive headers
-      authorization: req.headers.authorization ? '[REDACTED]' : undefined,
-      'x-api-key': req.headers['x-api-key'] ? '[REDACTED]' : undefined
+        'content-type': req.headers['content-type'],
+        authorization: req.headers.authorization,
+        'x-api-key': req.headers['x-api-key']
+      })
     },
     tenantId: req.tenant?.id,
     apiKeyId: req.apiKey?.id
@@ -76,7 +105,7 @@ export function requestLogger(req, res, next) {
       },
       req: {
         method: req.method,
-        url: req.url
+        url: redactUrl(req.url)
       },
       duration,
       tenantId: req.tenant?.id,
@@ -101,10 +130,10 @@ export function errorLogger(err, req, res, next) {
     },
     req: {
       method: req.method,
-      url: req.url,
-      body: isDevelopment ? req.body : undefined,
+      url: redactUrl(req.url),
+      body: isDevelopment ? redactSecrets(req.body) : undefined,
       params: req.params,
-      query: req.query
+      query: redactSecrets(req.query)
     },
     tenantId: req.tenant?.id,
     apiKeyId: req.apiKey?.id

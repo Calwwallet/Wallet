@@ -1,7 +1,7 @@
 {
   "name": "agent-wallet-service",
   "version": "0.1.0",
-  "description": "Stripe for AI Agent Wallets — Add wallet functionality to any AI agent in seconds",
+  "description": "Stripe for AI Agent Wallets \u2014 Add wallet functionality to any AI agent in seconds",
   "main": "src/index.js",
   "type": "module",
   "bin": {
@@ -23,7 +23,8 @@
     "test:wallet": "node tests/test-wallet.js",
     "test:auth": "node tests/test-auth.js",
     "test:hitl": "node tests/test-hitl.js",
-    "prepack": "npm test"
+    "prepack": "npm test",
+    "test:auth:security": "node tests/test-auth-security.js"
   },
   "keywords": [
     "ai",

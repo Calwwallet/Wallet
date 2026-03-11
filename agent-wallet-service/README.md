@@ -31,8 +31,10 @@ fi
 # Edit only if your server is not on localhost:3000
 export AGENT_WALLET_API="http://localhost:3000"
 
-# 1) Read bootstrap admin key created on first startup
-export BOOTSTRAP_KEY="$(node -e "console.log(JSON.parse(require('fs').readFileSync('api-keys.json','utf8'))[0].key)")"
+# 1) Obtain bootstrap admin key (one-time setup mode)
+#    Run the server once with SHOW_BOOTSTRAP_SECRET=true to print the full key.
+#    The key is not stored in plaintext on disk.
+export BOOTSTRAP_KEY="<paste_bootstrap_key_from_startup_log>"
 echo "bootstrap key: ${BOOTSTRAP_KEY:0:12}..."
 
 # 2) Create scoped app key (read/write)
@@ -105,7 +107,8 @@ On-chain identity for AI agents:
 
 ### 🔐 API Key Authentication
 
-- Generate/revoke API keys
+- Generate/revoke API keys (header transport only)
+- API keys are hashed at rest in `api-keys.json`
 - Role-based permissions (read/write/admin)
 - Weighted rate limiting built-in (route-aware costs)
 - Tier-aware limits (`free`, `pro`, `enterprise`)
@@ -281,7 +284,7 @@ GET  /ens/:name                          Resolve ENS details
 
 | Error case | HTTP status | Typical message | What to do |
 |---|---:|---|---|
-| Missing API key | 401 | `API key required` | Send `X-API-Key` header (or `?apiKey=` query param). |
+| Missing API key | 401 | `API key required` | Send `X-API-Key` header. Query param auth is rejected by default. |
 | Invalid API key | 403 | `Invalid API key` | Ensure the key exists and has not been revoked. |
 | Free-tier missing RPC URL | 400 | `Free-tier API keys must provide a BYO RPC URL` | Send `X-RPC-URL` header (or `rpcUrl` query/body). |
 | Free-tier balance/all call | 403 | `BYO RPC does not support /balance/all` | Use `GET /wallet/:address/balance?chain=...&rpcUrl=...` instead. |
@@ -303,6 +306,14 @@ GET  /ens/:name                          Resolve ENS details
 - Assign tier on key creation via permission tag, e.g. `["read","write","tier:pro"]`.
 - Free-tier (`tier:free`) keys must provide BYO RPC URL (`X-RPC-URL`, `rpcUrl` query/body).
 - Restrict BYO hosts via `BYO_RPC_ALLOWED_HOSTS` (default: `*.g.alchemy.com,*.alchemy.com`).
+
+## Security migration notes
+
+- `api-keys.json` now stores `{ keyHash, keyPrefix, ... }` only. Plain API keys are never persisted.
+- If you already had plaintext `api-keys.json` entries, they are migrated to hashed records on startup.
+- Query parameter auth (`?apiKey=`) is disabled by default. Use `X-API-Key` header.
+- Temporary local fallback is available only in non-production by setting `ALLOW_QUERY_API_KEY_FALLBACK=true`.
+- `SHOW_BOOTSTRAP_SECRET=true` is intended for explicit one-time setup only and is ignored in production.
 
 ## Architecture
 

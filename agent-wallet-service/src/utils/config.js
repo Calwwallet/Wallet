@@ -106,6 +106,11 @@ const CONFIG_SCHEMA = {
     default: false,
     description: 'Show full bootstrap API key on startup'
   },
+  ALLOW_QUERY_API_KEY_FALLBACK: {
+    type: 'boolean',
+    default: false,
+    description: 'Development-only fallback to accept ?apiKey= query parameter'
+  },
   
   // Features
   ENABLE_MCP: {
@@ -228,6 +233,13 @@ export function validateConfig() {
       warnings.push({
         key: 'SHOW_BOOTSTRAP_SECRET',
         message: 'Should be false in production'
+      });
+    }
+
+    if (config.ALLOW_QUERY_API_KEY_FALLBACK) {
+      warnings.push({
+        key: 'ALLOW_QUERY_API_KEY_FALLBACK',
+        message: 'Ignored in production; keep disabled for secure header-only auth'
       });
     }
   }
