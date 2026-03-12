@@ -144,3 +144,9 @@ After **each merge**, run the full release checklist and publish a status summar
 - [ ] ...
 - [ ] ...
 ```
+
+## 8) Immediate Execution Runbook
+
+For command-first execution (sync, gate checks, RC/stable tagging, and branch dispatch), use:
+
+- `docs/NEXT_ACTION_COMMANDS.md`
