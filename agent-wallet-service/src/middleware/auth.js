@@ -8,6 +8,7 @@ import { loadApiKeysRaw, saveApiKeys } from '../repositories/api-key-repository.
 import { getRedis } from '../services/redis.js';
 import { getDb } from '../services/db.js';
 import { hashApiKey } from '../utils/api-key-hash.js';
+import { sendError } from '../utils/error-envelope.js';
 const ONBOARDING_PATH = '/onboarding';
 
 const USE_DB_AUTH = process.env.AUTH_BACKEND === 'db' || process.env.STORAGE_BACKEND === 'db';

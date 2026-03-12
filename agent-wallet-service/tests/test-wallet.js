@@ -23,6 +23,14 @@ function resolveApiKey() {
 
 const API_KEY = resolveApiKey();
 
+
+function extractErrorCode(body) {
+  if (!body) return '';
+  if (typeof body.error_code === 'string') return body.error_code;
+  if (body.error && typeof body.error.code === 'string') return body.error.code;
+  return '';
+}
+
 function extractErrorMessage(body) {
   if (!body) return '';
   if (typeof body.error === 'string') return body.error;
@@ -111,7 +119,7 @@ async function testGetWalletByAddressNotFound() {
   const { response, body } = await request(`/wallet/${missing}`);
 
   assert(response.status === 404, `Expected 404 for unknown wallet, got ${response.status}: ${JSON.stringify(body)}`);
-  assert(body.error_code === 'WALLET_NOT_FOUND', `Expected WALLET_NOT_FOUND, got: ${JSON.stringify(body)}`);
+  assert(extractErrorCode(body) === 'WALLET_NOT_FOUND', `Expected WALLET_NOT_FOUND, got: ${JSON.stringify(body)}`);
 }
 
 async function testGetWalletByAddressInvalidFormat() {
@@ -119,7 +127,7 @@ async function testGetWalletByAddressInvalidFormat() {
   const { response, body } = await request('/wallet/not-a-wallet-address');
 
   assert(response.status === 404, `Expected 404 for invalid address format, got ${response.status}: ${JSON.stringify(body)}`);
-  assert(body.error_code === 'WALLET_NOT_FOUND', `Expected WALLET_NOT_FOUND for invalid address, got: ${JSON.stringify(body)}`);
+  assert(extractErrorCode(body) === 'WALLET_NOT_FOUND', `Expected WALLET_NOT_FOUND for invalid address, got: ${JSON.stringify(body)}`);
 }
 
 async function testGetBalance(address) {

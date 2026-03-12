@@ -41,6 +41,7 @@ import {
   rejectPendingApproval,
   cancelPendingApproval
 } from '../repositories/pending-approval-repository.js';
+import { sendError } from '../utils/error-envelope.js';
 
 const router = Router();
 router.use(attachRpcContext);
