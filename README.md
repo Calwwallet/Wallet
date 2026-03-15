@@ -44,10 +44,10 @@
   <img src="docs/images/ai-agent-comic.png" alt="AI Agent using Claw Wallet" width="400" />
 </p>
 
-> *"Managing private keys? Just use Claw Wallet API!"* 🦞
+> *"Simplify your agent wallets. Namaste."* 🦞🙏
 
 <p align="center">
-  <img src="docs/images/drake-meme-comic.png" alt="Claw Wallet Meme" width="300" />
+  <img src="docs/images/lobster-monk-meme.png" alt="Lobster Monk Wisdom" width="350" />
 </p>
 
 ---
